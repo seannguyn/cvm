@@ -26,7 +26,7 @@ runnable mock — no live Wiz tenant required to exercise it.
 
 **Schema** (`schemas/`): `exemption.defs.json` (shared exemption + operator +
 enforcement defs), `cluster.schema.json`, `global.schema.json`. An exemption is
-`{value, operator(equals|starts_with), ticket, system_x_id?, approved_by, expiry}`.
+`{value, operator(equals|starts_with), jiraTicketId, pactId?, approved_by, expiry}`.
 
 **Cluster/global YAMLs** filled in with the real schema: `dev/anp07`, `dev/anp02`
 (cluster-level enforcement override + `v2.0.0` pin), `prod/apr01`, and each env's

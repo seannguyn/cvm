@@ -52,7 +52,7 @@ fields; they are fed from the cluster YAML's `self_built` and `vendor_or_oss` en
 | **Vendor / OSS** | `vendor_or_oss` | Image-Trust ignore rule (`image_name`) | Built externally; allowed by name past the trust check, **not scanned**. |
 
 `operator: equals` gives a Fully Qualified Image Name (repo:tag); `operator: starts_with`
-gives a prefix. Business fields (`ticket`, `system_x_id`, `approved_by`, `expiry`) are
+gives a prefix. Business fields (`jiraTicketId`, `pactId`, `approved_by`, `expiry`) are
 validated but never reach Wiz.
 
 ## Key decisions

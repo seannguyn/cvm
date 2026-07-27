@@ -83,8 +83,8 @@ container-vulnerability-exemption-tf_version: v2.0.0
 self_built:
   - value: "ecr/tenant_Y_image:1.0.0"
     operator: equals            # equals (FQIN) | starts_with
-    ticket: JIRA-1234
-    system_x_id: SYS-abc
+    jiraTicketId: JIRA-1234
+    pactId: SYS-abc
     approved_by: security-team
     expiry: "2026-12-31"
 
@@ -93,8 +93,8 @@ self_built:
 vendor_or_oss:
   - value: "registry.k8s.io/pause"
     operator: starts_with
-    ticket: JIRA-5678
-    system_x_id: SYS-def
+    jiraTicketId: JIRA-5678
+    pactId: SYS-def
     approved_by: platform-team
     expiry: "2027-06-30"
 ```
@@ -108,12 +108,12 @@ admission:
 vendor:                       # optional env-wide vendor allowlist, applied to all clusters
   - value: "public.ecr.aws/"
     match: starts_with
-    ticket: JIRA-0001
+    jiraTicketId: JIRA-0001
     approved_by: platform-team
     expiry: "2027-01-01"
 ```
 
-`self_built.value` + `match` populate `name_v2.equals/starts_with` on the Vulnerability ignore rule; `vendor.value` + `match` populate `image_name.equals/starts_with` on the Image-Trust ignore rule (both are the fields marked `# EDITABLE via customer facing repos`). Business fields (ticket, system_x_id, approved_by, expiry) are validated but do not reach Wiz.
+`self_built.value` + `match` populate `name_v2.equals/starts_with` on the Vulnerability ignore rule; `vendor.value` + `match` populate `image_name.equals/starts_with` on the Image-Trust ignore rule (both are the fields marked `# EDITABLE via customer facing repos`). Business fields (jiraTicketId, pactId, approved_by, expiry) are validated but do not reach Wiz.
 
 ## Work plan
 

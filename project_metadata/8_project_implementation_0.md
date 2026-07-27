@@ -13,7 +13,7 @@ There should be 2 repos:
   - self-built: this will correspond to wiz-v2_ignore_rule for wiz-v2_cicd_scan_policy of type: `Vulnerability` because these images will need to go through CICD pipeline
   - vendor and OSS: this will correspond to wiz-v2_ignore_rule for wiz-v2_cicd_scan_policy of type: `Image Trust Policy` because these are built externally.
 - so for each cluster that customer owns, customer should be able to configure these 2 types of images for exemption. Make the best practice interface here correspond to the field with comments "# EDITABLE via customer facing repos" in container-vulnerability-exemption-tf/terraform/wiz-policies.tf
-- This repo should cater for other fields that is more business/process related: Jira ticket ID, SYSTEM_X_ID, expiry, etc.
+- This repo should cater for other fields that is more business/process related: Jira jiraTicketId ID, pactId, expiry, etc.
 - ignore exemption/pck. only focus on exemption/unikube
 - CODEOWNERS to clearly demonstrate who can own the the cluster file. There are 3 actors: security, platform team (either pck, unikube, other container platform team), and customers (customers of pck/unikube/other container platform)
 

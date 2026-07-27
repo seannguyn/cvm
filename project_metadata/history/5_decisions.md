@@ -58,7 +58,7 @@ ANSWWER: treat the VULNERABILITY,SECRETS,MALWARE under exemptions to be blackbox
    exemptions:
       VULNERABILITIES:
         - reason: "No upstream fix; vulnerable code path not reachable in our config."
-          ticket: SEC-1234
+          jiraTicketId: SEC-1234
           approved_by: security-team
           property: # this should match whatever the vulnerability findings of Wiz terraform say, treat as blackbox for no2
             cve: CVE-2025-12345
