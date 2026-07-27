@@ -35,31 +35,33 @@ The original single-cluster reference the engine module was built from was parke
 ## Folder shape
 
 ```
-container-vulnerability-exemption/          # interface
-  exemptions/unikube/{dev,nonprod,preprod,prod}/{global,<CLUSTER>}.yaml
-  exemptions/pck/                           # different team, out of scope
-  schemas/  CODEOWNERS
-  scripts/  validate.py compute_matrix.py render.py mock_plan.py common.py
-  tests/
+container-vulnerability-exemption/          # interface (per-platform layout)
+  README.md  CODEOWNERS
+  unikube/                                  # the unikube platform
+    exemptions/{dev,nonprod,preprod,prod}/{global,<CLUSTER>}.yaml
+    schemas/  scripts/  tests/  README.md
+  pck/                                      # different team, out of scope (stub)
   .github/workflows/  terraform.yaml unikube.yaml wiz-scan.yaml(parked)
   .github/actions/tf/  action.yaml
 container-vulnerability-exemption-tf/       # engine
-  main.tf providers.tf variables.tf versions.tf backend.tf outputs.tf
-  modules/cluster_policy_set/               # the 5 objects, one cluster
-  bootstrap/                                # golden cst-container-vuln-default, own state
-  examples/anp07.auto.tfvars.json
+  terraform/
+    main.tf providers.tf variables.tf versions.tf backend.tf outputs.tf
+    modules/cluster_policy_set/             # the 5 objects, one cluster
+    bootstrap/                              # golden cst-container-vuln-default, own state
+    examples/anp07.auto.tfvars.json
 out/wiz-policies.tf                         # original reference (gitignored scratch, not committed)
 ```
 
 ## Try it (no Wiz tenant needed)
 
 ```bash
-cd container-vulnerability-exemption
-pip install pyyaml jsonschema pytest --break-system-packages
+cd container-vulnerability-exemption/unikube
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r scripts/requirements.txt
 python3 scripts/validate.py
-python3 scripts/mock_plan.py anp07
+python3 scripts/mock_plan.py dev/anp07
 python3 -m pytest -q
 ```
 
-See `container-vulnerability-exemption/README.md` for local plan/apply against a real
-Wiz tenant (`WIZ_CLIENT_ID` / `WIZ_CLIENT_SECRET`, local engine HEAD).
+See `container-vulnerability-exemption/unikube/README.md` for local plan/apply against a
+real Wiz tenant (`WIZ_CLIENT_ID` / `WIZ_CLIENT_SECRET`, local engine HEAD).

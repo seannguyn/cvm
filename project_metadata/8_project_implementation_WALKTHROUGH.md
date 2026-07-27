@@ -4,6 +4,12 @@ What was built for the consolidated goal in `8_project_implementation_0.md`, and
 decisions from the answered `8_project_implementation_PLAN.md`. Everything is a
 runnable mock — no live Wiz tenant required to exercise it.
 
+> Note: a later hardening pass (see `history/improvements.md`) restructured the layout —
+> interface config/scripts/tests/schemas are now scoped under `unikube/`, engine
+> Terraform under `terraform/`, scripts take `<env>/<cluster>`, and tests use synthetic
+> fixtures. `9_project_summary.md` and the repo READMEs reflect the **current** layout;
+> paths in the body below describe the original phase-8 build.
+
 ## Decisions applied
 
 - **Goal doc is authoritative.** Naming reverted to `cst-container-vuln-*` /
