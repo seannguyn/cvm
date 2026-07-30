@@ -211,3 +211,196 @@ Migrate for me. make sure all files are compliant with new structure
 </user_response>
 - **`matches_regex` provider support.** Assumed the `wiz-v2` provider exposes
   `matches_regex` on `name_v2`/`image_name`; flag to confirm during the Wiz spike.
+
+---
+
+# Round 2 — answers digested, expansions, and 2 remaining decisions
+
+**Repo layout note.** Everything now lives under `wiz/` (e.g.
+`wiz/container-vulnerability-exemption/unikube/...`, `wiz/container-vulnerability-exemption-tf/...`).
+`self-built-image/` will go under `wiz/`. `kyverno/` is out of scope for this build.
+
+## Locked from your answers
+- **Regex** is real regex; I'll fix the samples (and regex-escape literal dots, e.g.
+  `^container-soe\.registry\.domain/`). (Q1)
+- Keep the `vuln_ignore` block **commented out**, not deleted. (Q2)
+- **`exemption` merges env-global + cluster**, same as `compliant_images`. (Q3)
+- Keep the `image_integrity_validator`; `wiz tag` becomes optional/informational. (Q6)
+- **All FROMs** in a multi-stage Dockerfile must be from `container-soe.registry.domain/*`,
+  plus a **freshness** check on the final base image. Use Dockerfile parse + `docker
+  inspect`, inspect authoritative. (Q7)
+- `self-built-image/` under `wiz/`; PR raised with a **GitHub App token (stubbed)**. (Q8)
+- **Migrate all env files** to the new schema. (pitfall)
+- **compliant_images regex is strict/exact** — `^registry/repo/image:tag$`. (pitfall)
+
+## unikube.yaml order (from your Q6 note)
+1. **Static compliance pre-check (before build):** parse every `FROM`; all must match
+   `^container-soe\.registry\.domain/`. Fail fast if not → tell tenant to raise a manual
+   `exemption` PR. (Answers "can it be before build?" — the *static* part, yes.)
+2. `docker build`.
+3. **Authoritative verification (after build):** `docker inspect` the built image to
+   confirm the actual base image **digests** and the final base image's **freshness**
+   (see Q10). This is the trustworthy gate.
+4. **Sign + attest** the image (SLSA provenance + a compliance predicate) — see the
+   primer below.
+5. **Wiz scan** against `cst-container-vuln-<env>-<cluster>` — policy is AUDIT, so
+   informational only, never blocks.
+6. **No `wiz tag`.**
+7. Open the auto-merge compliant PR (see Q9).
+
+## Q5 expanded — signing, attestation, SLSA (primer)
+
+You asked me to expand since this is new. Plain-English:
+
+- **The problem.** "This image is compliant" must be *tamper-evident and durable*, not a
+  log link that expires. Signing + attestation give you cryptographic, permanent proof.
+- **Sigstore / cosign (keyless).** In GitHub Actions the workflow has an **OIDC identity**
+  (it can prove "I am the workflow of `org/self-built-image` at commit X"). `cosign sign`
+  uses that identity to sign the image **without you managing private keys**; the
+  short-lived signing certificate (bound to that workflow identity) is recorded in a
+  **transparency log (Rekor)**. Later, anyone can verify the signature *and* that it was
+  produced by exactly that workflow.
+- **Attestation (`cosign attest`).** Beyond "signed", you attach a **signed statement**
+  (in-toto format) to the image in the registry. The statement's **predicate** is
+  structured JSON. Two we'd use:
+  - **SLSA provenance** — auto-describes the build (builder = GitHub Actions, source repo,
+    commit, trigger). Proves *where/how it was built* (i.e. it really came from your CI,
+    not a laptop).
+  - **Custom compliance predicate** — our own JSON, e.g.
+    `{ all_from_soe: true, base_images: ["...@sha256:..."], final_base_fresh: true, checked_at: "..." }`.
+- **Verification (`cosign verify-attestation`).** Checks: (1) signature valid + in the
+  log, (2) the **signer identity** matches the expected tenant workflow, (3) the predicate
+  satisfies policy. This can be enforced later by admission (Kyverno) or re-checked in CI.
+- **What we store in the YAML.** The **attestation digest** (`sha256:` of the attestation
+  manifest) — an immutable pointer to the signed evidence that lives in the registry.
+  Even after the Actions run log expires, the signed attestation persists and is
+  verifiable; the digest in git lets anyone find and re-verify it.
+- **Mock reality.** There's no real registry/OIDC here, so I'll **stub** the
+  `cosign sign/attest/verify` calls (echo + a deterministic fake digest) but wire the
+  real step sequence and store all the fields, so real cosign drops in later.
+
+`compliant_images` entry shape (all required, per your Q5):
+```yaml
+compliant_images:
+  - image_regex_pattern: "^ecr/tenant_Y_image:1\\.0\\.0$"   # exact FQIN, regex-escaped
+    base_image: "container-soe.registry.domain/alpine:3.20"
+    base_image_digest: "sha256:..."
+    attestation_digest: "sha256:..."     # the signed compliance/SLSA attestation
+    source_repo: "org/self-built-image"
+    source_commit: "abc123def"
+    source_run: "https://github.com/org/self-built-image/actions/runs/123"
+    added_at: "2026-07-30"
+```
+
+## Q4 answered + Q9 (needs your confirm)
+
+Yes, a **service-account / GitHub-App can approve + enable auto-merge**. But CODEOWNERS is
+**per file/path, not per key** — so if `compliant_images` (auto) and `exemption`
+(security-approved) sit in the *same* file, making the SA a CODEOWNER of that file lets it
+auto-approve `exemption` edits too, defeating security review. So SA-auto-merge only works
+cleanly if the two are in **separate files**:
+
+- `wiz/.../exemptions/<env>/<cluster>.yaml` — `exemption`, `admission`, pins. **Owned by
+  security/platform** (manual approval).
+- `wiz/.../exemptions/<env>/<cluster>.compliant.yaml` — `compliant_images` only. **Owned
+  by the automation SA** (`@org/compliance-bot`) → SA approves + auto-merges.
+
+Global mirrors this: `global.yaml` (manual) + `global.compliant.yaml` (auto). Both merge
+into the cluster at render time exactly as planned.
+
+**Q9: Confirm this two-file split** (it's the only way SA-approval + auto-merge coexists
+with security-gated exemptions). If you'd rather keep one file, then compliant PRs can't
+truly auto-merge — they'd need the file's normal review.
+
+<user_response>
+
+Yes let's split it in 2 files
+
+</user_response>
+
+## Q10 — freshness window + "can't fake it" nuance
+- **Freshness window:** what max age for the **final base image** (from its image config
+  `.Created`)? I'll default to **30 days** unless you say otherwise.
+- **"docker inspect can't be faked" — mostly right, with one caveat:** the built image's
+  **layer/base digests and history are content-addressed**, so those are authoritative and
+  effectively unforgeable. But **`LABEL`s / arbitrary metadata *can* be set to anything**
+  in a Dockerfile — so the gate must key off the **base image digests**, not off labels.
+  Confirm we trust digests, not labels.
+
+<user_response>
+30 days freshness is good
+we trust digests, not labels. so when the base image is built by other team, they can add labels to their dockerfile, and this become base image digest?
+</user_response>
+
+## Status (round 2)
+Q9 = split into two files. Q10 = 30-day freshness, trust digests not labels. See round 3.
+
+---
+
+# Round 3 — final design lock (implementation-ready)
+
+## Your label/digest question, answered precisely
+> "when the base image is built by other team, they can add labels to their dockerfile,
+> and this become base image digest?"
+
+Careful — two different things:
+- **Labels *are* part of the image config, and the config *is* covered by the digest.** So
+  changing a label changes that image's digest. In that narrow sense "labels → digest".
+- **But that does NOT make label *values* trustworthy.** Whoever builds an image chooses
+  its labels freely. A tenant could write `LABEL org.opencontainers.image.base.name=container-soe.registry.domain/alpine`
+  while actually building `FROM docker.io/evil`. The label is "valid" (part of the digest)
+  but a **lie**. So we never trust label *claims* about the base.
+- **The unforgeable signal is layer identity, not labels.** A built image physically
+  contains its base image's layers as its lower layers. Those layer hashes (`diff_ids`)
+  are content-addressed — you cannot reproduce them without actually using that base. So
+  the authoritative check is: *do the built image's lower layers match the layers of an
+  approved `container-soe.registry.domain/*` base (resolved to a digest)?* — not "what does
+  a label say."
+
+## Final compliance gate (two parts)
+1. **Static (pre-build, fast-fail):** every `FROM` in the Dockerfile references
+   `^container-soe\.registry\.domain/`. Covers all stages incl. build tooling.
+2. **Authoritative (post-build):** resolve the declared final base to a **digest**, pull
+   it, and confirm the built image's lower layer `diff_ids` equal that base's layers; then
+   check that base image config `.Created` is **≤ 30 days** old. Decision keys off
+   **digests/layers, never labels**. (Mock: `docker inspect` + stubbed comparison.)
+
+*Freshness is a build-time gate on being ADDED to `compliant_images`; admission itself is
+name-based and persistent, so an image already on the list is not re-blocked when it later
+ages past 30 days. Re-running unikube on a stale base will fail and prompt a rebuild.*
+
+## File split (locked)
+Per cluster and per env, two files:
+- `…/exemptions/<env>/<cluster>.yaml` — `exemption`, `admission`, pins → **security/platform** owned (manual).
+- `…/exemptions/<env>/<cluster>.compliant.yaml` — `compliant_images` only → **`@org/compliance-bot`** owned (SA approves + auto-merges).
+- `…/exemptions/<env>/global.yaml` (manual) + `…/exemptions/<env>/global.compliant.yaml` (auto).
+
+Render merges all applicable files: `exemption_regex` = env `global.yaml` + cluster
+`<cluster>.yaml`; `compliant_regex` = env `global.compliant.yaml` + cluster
+`<cluster>.compliant.yaml`. Cluster discovery keys off `<cluster>.yaml`; `*.compliant.yaml`,
+`global*.yaml`, `golden.yaml` are never treated as clusters. compute_matrix maps a changed
+`<cluster>.compliant.yaml` to its cluster; a changed `global*.yaml`/`global.compliant.yaml`
+fans out to the env.
+
+CODEOWNERS (last-match-wins): general exemptions → security/platform (prod/preprod add
+security); then a trailing `*.compliant.yaml` rule → `@org/compliance-bot`.
+
+## Build inventory (what round 3 produces)
+- **Schema:** rewrite `exemption.defs.json` (regex item + compliant item w/ required
+  provenance); `cluster.schema.json` (`exemption[]`), new `cluster.compliant.schema.json`
+  (`compliant_images[]`); `global.schema.json` + `global.compliant.schema.json`;
+  `validate.py` compiles every regex, enforces anchoring for compliant, expiry/dupe checks.
+- **Engine:** module → `matches_regex`, two trust ignore rules (compliant + exemption),
+  `vuln` AUDIT, `vuln_ignore` kept commented; vars `compliant_regex`/`exemption_regex`;
+  `policy_names` (5); root wiring + example tfvars.
+- **Scripts:** `common.py` merge helpers + sidecar-aware discovery; `render.py` new tfvars;
+  `mock_plan.py`; migrate ALL env files to the split schema; update tests + fixtures.
+- **Workflows:** `unikube.yaml` = static check → build → inspect (digests+freshness) →
+  stubbed cosign sign/attest → informational Wiz scan → no tag → auto-merge compliant PR
+  (GitHub App token, stubbed); `terraform.yaml`/`tf` action adjust for the new tfvars.
+- **New `wiz/self-built-image/`:** alpine+`sleep` Dockerfile + workflow calling `unikube.yaml`.
+- **Docs:** `9_project_summary.md`, both READMEs, "How a change flows" (+ compliant auto-PR),
+  CODEOWNERS.
+- **Verify:** validate + pytest + tf brace/fmt + yaml parse, all green.
+
+**Implementation-ready.** Prompt me for round 3 and I'll build the above.

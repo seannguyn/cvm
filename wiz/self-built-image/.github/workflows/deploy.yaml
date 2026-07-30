@@ -1,0 +1,24 @@
+name: deploy
+# Tenant repo workflow. Builds this repo's image and calls the shared unikube compliance
+# workflow to get it admitted on the listed clusters. If the image is compliant
+# (built on container-soe.registry.domain/*), the shared workflow opens an auto-merged
+# PR adding it to those clusters' compliant list. If not, this fails and you must raise
+# a manual exemption PR in container-vulnerability-exemption.
+
+on:
+  push:
+    branches: [main]
+    paths: ["Dockerfile", ".github/workflows/deploy.yaml"]
+  workflow_dispatch:
+
+jobs:
+  admit:
+    uses: org/container-vulnerability-exemption/.github/workflows/unikube.yaml@main
+    with:
+      image: ecr/tenant_Y_image
+      tag: "1.0.0"
+      target_clusters: '["nonprod/wizn02", "prod/fsp02"]'
+    secrets:
+      WIZ_CLIENT_ID: ${{ secrets.WIZ_CLIENT_ID }}
+      WIZ_CLIENT_SECRET: ${{ secrets.WIZ_CLIENT_SECRET }}
+      EXEMPTION_REPO_TOKEN: ${{ secrets.EXEMPTION_REPO_TOKEN }}   # GitHub App token (stubbed)

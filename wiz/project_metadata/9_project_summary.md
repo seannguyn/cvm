@@ -37,28 +37,29 @@ The engine is never edited by customers.
 
 ## The 5 Wiz objects per cluster
 
-Every cluster gets exactly five objects (defined in
+Every cluster gets five objects (defined in
 `container-vulnerability-exemption-tf/terraform/modules/cluster_policy_set`):
 
-1. `wiz-v2_cicd_scan_policy` **`cst-container-vuln-<env>-<cluster>`** — Vulnerability scan policy, a separate instance copying the golden default's baseline params.
-2. `wiz-v2_ignore_rule` **`cst-container-vuln-ignore-<env>-<cluster>`** — self-built exemptions (`name_v2` equals/starts_with).
-3. `wiz-v2_image_integrity_validator` **`match-all-<env>-<cluster>`** — attestation check.
-4. `wiz-v2_cicd_scan_policy` **`cst-container-image-trust-<env>-<cluster>`** — Image-Trust admission policy (AUDIT/BLOCK).
-5. `wiz-v2_ignore_rule` **`cst-container-image-trust-ignore-<env>-<cluster>`** — vendor/OSS allowlist (`image_name` equals/starts_with).
+1. `wiz-v2_cicd_scan_policy` **`cst-container-vuln-<env>-<cluster>`** — Vulnerability scan policy, **AUDIT** (informational), a separate instance copying the golden default's baseline params.
+2. `wiz-v2_image_integrity_validator` **`match-all-<env>-<cluster>`** — attestation check (fallback for un-listed images).
+3. `wiz-v2_cicd_scan_policy` **`cst-container-image-trust-<env>-<cluster>`** — Image-Trust admission policy (AUDIT/BLOCK).
+4. `wiz-v2_ignore_rule` **`cst-container-image-trust-ignore-compliant-<env>-<cluster>`** — automated compliant allowlist (`image_name.matches_regex`).
+5. `wiz-v2_ignore_rule` **`cst-container-image-trust-ignore-exemption-<env>-<cluster>`** — manual exemption allowlist (`image_name.matches_regex`).
 
-The `equals`/`starts_with` lists on objects 2 and 5 are the only customer-editable
-fields; they are fed from the cluster YAML's `self_built` and `vendor_or_oss` entries.
+The vuln ignore rule (`vuln_ignore`) is intentionally kept **commented out** — vuln is no
+longer a gate. The `matches_regex` lists on objects 4 and 5 are the customer-facing fields.
 
-## The two exemption types
+## The two allowlist types (compliance model)
 
-| Type | YAML key | Maps to | Behaviour |
-|------|----------|---------|-----------|
-| **Self-built** | `self_built` | Vulnerability ignore rule (`name_v2`) | Image goes through CICD; still **scanned + tagged** by the tenant via `unikube.yaml`. |
-| **Vendor / OSS** | `vendor_or_oss` | Image-Trust ignore rule (`image_name`) | Built externally; allowed by name past the trust check, **not scanned**. |
+| Type | YAML file | Maps to | Who writes it |
+|------|-----------|---------|---------------|
+| **Compliant** | `<cluster>.compliant.yaml` / `global.compliant.yaml` | compliant ignore rule | **Automated** — the `unikube.yaml` workflow proves the image is built on `container-soe.registry.domain/*`, then opens an **auto-merged** bot PR. |
+| **Exemption** | `<cluster>.yaml` / `global.yaml` (`exemption[]`) | exemption ignore rule | **Manual** — tenant PR, **security-approved**. Vendor/OSS or accepted-risk images. |
 
-`operator: equals` gives a Fully Qualified Image Name (repo:tag); `operator: starts_with`
-gives a prefix. Business fields (`jiraTicketId`, `pactId`, `approved_by`, `expiry`) are
-validated but never reach Wiz.
+Both use a single **`matches_regex`** (Wiz treats `equals`/`starts_with` as mutually
+exclusive). Compliant patterns are exact anchored FQINs; exemption patterns may be broader.
+Vuln scanning still runs in CI but is **informational** (the vuln policy is AUDIT). The
+signing/attestation trust model is explained in `image-signing-101.md`.
 
 ## Key decisions
 
@@ -69,8 +70,8 @@ validated but never reach Wiz.
 5. **Promotion axis = Wiz tenant, not k8s env.** All unikube envs live in the same Wiz PROD tenant. CD applies to **Wiz NONPROD** (verify) then, after a gated approval, **Wiz PROD** — chosen by which `WIZ_CLIENT_ID` / `WIZ_CLIENT_SECRET` are set.
 6. **Enforcement per env, overridable per cluster.** `admission.enforcement` (AUDIT/BLOCK) is set in each env's `global.yaml` and may be overridden in a cluster file.
 7. **Version + schema pinning.** Both the engine version and `schema_version` are pinned per env in `global.yaml`, overridable per cluster; **the cluster pin always wins**. There is no global `version.yaml`.
-8. **Fixed reference bug.** In the reference `out/wiz-policies.tf`, the Image-Trust policy linked the *Vulnerability* ignore rule; the module links object 4 → object 5 correctly.
-9. **Attestation is per-policy.** Passing `cst-container-vuln-<env>-<cluster>` attests an image only for that cluster; to run on N clusters a tenant scans against each (`unikube.yaml`'s `target_clusters` matrix).
+8. **Compliance model, not a vuln gate.** Admission is name/regex based via two Image-Trust ignore rules (compliant + exemption). Vuln scanning runs in CI but is **informational** (vuln policy = AUDIT); the image-integrity validator stays as a fallback for images matching no rule. Single `matches_regex` operator (Wiz `equals`/`starts_with` are mutually exclusive).
+9. **Compliant is automated, exemption is manual.** `compliant_images` (proven built on `container-soe.registry.domain/*`) are written by the `unikube.yaml` workflow into `*.compliant.yaml` (bot-owned, **auto-merged**); `exemption` entries are manual, security-approved. They live in **separate files** so path-based CODEOWNERS can auto-merge one while gating the other.
 10. **Per-platform layout + isolated tests.** Interface config/scripts/tests/schemas are scoped under `unikube/` (extensible to `pck/`); engine Terraform is all under `terraform/`; scripts address clusters as `<env>/<cluster>`; and the pytest suite runs against synthetic fixtures, never live config.
 
 ## How a change flows
@@ -87,18 +88,23 @@ that cluster resolves to (**cluster pin trumps env pin**). Blast radius is one c
 
 The concrete use cases:
 
-**1. Add/modify an exemption on one cluster (most common).**
-A tenant edits `unikube/exemptions/<env>/<cluster>.yaml` (a `self_built` or `vendor_or_oss`
-entry) → PR → approval → merge. Matrix = that one cluster (`apply`). Its 5 objects are
-re-applied, updating the `equals`/`starts_with` lists on the matching ignore rule. For a
-new `self_built` entry the tenant then re-runs `unikube.yaml` (use case 7).
+**1. Add/modify a manual exemption on one cluster.**
+A tenant edits `unikube/exemptions/<env>/<cluster>.yaml` (an `exemption` entry) → PR →
+**security approval** → merge. Matrix = that one cluster (`apply`); the `matches_regex`
+list on the exemption ignore rule is updated.
 
-**2. Env-wide change via `global.yaml`.**
-Edit `unikube/exemptions/<env>/global.yaml` (enforcement, the env-wide `vendor_or_oss`
-allowlist, or the env-level version/schema pin) → PR → approval → merge. Matrix = **every
-cluster in that env** (`apply`). Each cluster is re-applied: the env-wide vendor allowlist
-is merged into each Image-Trust ignore rule, and an enforcement change flips each
-cluster's Image-Trust policy (unless that cluster overrides it).
+**1b. Compliant image added automatically (most common for self-built).**
+A tenant pushes to their own repo; `unikube.yaml` verifies the image is built on
+`container-soe.registry.domain/*`, then opens an **auto-merged** bot PR editing
+`<env>/<cluster>.compliant.yaml`. Matrix = that cluster (the sidecar maps to it) → `apply`;
+the compliant ignore rule gains the exact FQIN. No human review (the base-image check is
+the gate). See use case 7.
+
+**2. Env-wide change via `global.yaml` / `global.compliant.yaml`.**
+Edit the env manual global (enforcement, env-wide `exemption`, version/schema pins) or the
+env compliant global → PR → merge. Matrix = **every cluster in that env** (`apply`). Merged
+lists are re-applied and an enforcement change flips each cluster's Image-Trust policy
+(unless that cluster overrides it).
 
 **3. Onboard a new cluster.**
 Add `unikube/exemptions/<env>/<cluster>.yaml`. Matrix = that cluster (`apply`, from the
@@ -137,20 +143,24 @@ bump, no `.tf` edits** — this is a pure value change.
   the engine module code (new resources + render + schema), so it follows use case 5 —
   cut a new engine tag and bump the version pin — plus adding the new params to `golden.yaml`.
 
-**7. Tenant admits a self-built image (in their own repo).**
-After the exemption PR from use case 1 is merged and applied, the tenant calls the
-reusable `unikube.yaml` (`image`, `tag`, `target_clusters`): it builds, `wizcli scan`s
-against each target cluster's `cst-container-vuln-<env>-<cluster>`, and `wiz tag`s on pass so
-that cluster's admission controller trusts the image. **Ordering matters:** the policy +
-ignore rule must already exist in Wiz (steps above merged + applied) before the tenant
-scans, or the scan still fails.
+**7. Tenant admits a self-built image (compliance flow, in their own repo).**
+The tenant calls the reusable `unikube.yaml` (`image`, `tag`, `target_clusters`). Per
+target it: (1) statically checks every `FROM` is `container-soe.registry.domain/*`; (2)
+builds; (3) verifies actual base-layer **digests** + freshness (≤ 30 days) — digests, not
+labels; (4) cosign **signs + attests** (SLSA + compliance predicate; stubbed in the mock);
+(5) runs an **informational** Wiz scan (AUDIT); (6) does **not** `wiz tag`; (7) opens an
+**auto-merged** PR adding the exact FQIN + provenance to `<env>/<cluster>.compliant.yaml`
+(use case 1b). If the base image isn't approved, the workflow **fails** and the tenant must
+raise a manual `exemption` PR (use case 1). See `image-signing-101.md` for the trust model.
 
-## Ownership (CODEOWNERS, three actors)
+## Ownership (CODEOWNERS)
 
-Security (`@org/security-leads`), platform (`@org/unikube-platform`), and customer teams
-who co-own their own cluster file. `CODEOWNERS`, and all `preprod/` + `prod/` changes,
-require security as an additional approver (the separate prod approval gate). `pck/` is a
-different team, out of scope. See `container-vulnerability-exemption/CODEOWNERS`.
+Four actors: security (`@org/security-leads`), platform (`@org/unikube-platform`), the
+automation service account (`@org/compliance-bot`, owns `*.compliant.yaml` → auto-merge),
+and customer teams who co-own their manual cluster file. `CODEOWNERS` and all `preprod/` +
+`prod/` **manual** changes require security approval; the trailing `*.compliant.yaml` rule
+lets the bot auto-merge compliant sidecars in every env. `pck/` is out of scope. See
+`container-vulnerability-exemption/CODEOWNERS`.
 
 ## Repository-specific detail
 
