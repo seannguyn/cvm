@@ -53,6 +53,37 @@ does (`docker inspect` the layers), and why it ignores labels.
 
 ---
 
+## 2b. This project uses NOTATION (Notary v2), not cosign — and why
+
+This is an **air-gapped, internal-enterprise** setup with a **CA + private key + signing
+certificate** (no internet, so Sigstore's keyless/Fulcio/Rekor is out). For that,
+**Notation (the Notary Project v2)** is the right tool:
+
+- It's built around **X.509 PKI**: a CA issues signing certs, verifiers carry a **trust
+  store** of CA certs and a **trust policy** — no external transparency log required.
+- Keys live behind a **plugin** to an HSM/KMS/Vault (enterprise key custody).
+- Signatures are OCI artifacts attached via the **referrers API (ORAS)** — fully offline.
+
+In this repo: Wiz's **shared image-integrity validator** is configured with `method = NOTARY`
+and the **CA certificate** as its trust root (bootstrap var `notary_ca_certificate`). The
+unikube workflow runs `notation sign` on compliant images; Wiz verifies the Notation
+signature at admission. `scripts/gen_signing_certs.sh` produces a local test CA + signing
+cert (openssl). Everything in §3–§6 below (cosign) is background/comparison — the *mechanism*
+(sign → attach → verify identity/trust) is the same; only the trust root differs (a CA you
+run, vs. Sigstore's public CA).
+
+### Cert expiry = revocation (important)
+
+Because admission depends on the signing cert chaining to the trusted CA, **when the signing
+certificate expires, images signed by it stop being admissible** — a coarse, fleet-wide
+revocation. This only holds if you do **NOT** use trusted **timestamping** (RFC 3161): a
+timestamped signature stays valid *after* cert expiry (it proves "signed while valid"), which
+is the opposite of what we want here. So: don't timestamp, or set the Notation **trust policy
+to require certificate validity at verification time**, and keep the signing-cert lifetime
+short. To revoke a *single* image (not all images from a cert) you need a deny rule / re-sign.
+
+---
+
 ## 3. Signing (cosign, keyless)
 
 Signing answers a different question: *"who produced this image/statement, and has it been
@@ -131,25 +162,32 @@ durable, auditable proof.
 
 ---
 
-## 6. How this project uses it
+## 6. How this project uses it (current model = NOTATION)
 
 The unikube workflow (`.github/workflows/unikube.yaml`) does, per target cluster:
 
-1. **Static** base-image check — every `FROM` must be `container-soe.registry.domain/*`.
-2. **Build.**
-3. **Authoritative** check — `docker inspect` the built image's base-layer **digests** +
+1. **Build.**
+2. **Informational** Wiz scan against the golden `cst-container-vuln-default` (AUDIT — never blocks).
+3. **Static** base-image check — every `FROM` must be `container-soe.registry.domain/*`.
+4. **Authoritative** check — `docker inspect` the built image's base-layer **digests** +
    the final base image's `.Created` (freshness ≤ 30 days). **Digests, not labels.**
-4. **Sign + attest** — cosign (keyless) signs, then attaches SLSA provenance + the custom
-   compliance predicate. We capture the **attestation digest**.
-5. **Wiz scan** — AUDIT, informational only.
-6. **No `wiz tag`** — attestation is optional; admission is name/regex based.
-7. **Auto-merge PR** — writes the exact FQIN + provenance into `<env>/<cluster>.compliant.yaml`.
+5. **Branch:**
+   - **Compliant** → `docker push`, then `notation sign` the pushed **digest** (NOTARY / CA
+     cert). Wiz's shared NOTARY validator verifies the signature at admission → admitted
+     **fleet-wide**. No YAML, no PR.
+   - **Not compliant** → check every target cluster's already-merged `exemptions` first; all
+     match → push (unsigned), else fail before touching the registry.
 
-**What we persist, and why:** the CI run log link expires, so it's a poor system of
-record. Instead each `compliant_images` entry stores durable evidence in git:
-`base_image` + `base_image_digest` (what it was built on), `attestation_digest` (pointer to
-the signed statement, which lives in the registry forever), and `source_repo` +
-`source_commit` (who/where). Anyone can later re-verify the attestation by digest.
+**Push precedes sign, not the other way round.** A Notation signature is an OCI artifact
+stored *in the registry* as a referrer to the image manifest (§2b), so there is nothing to
+sign until the image is pushed. The gap is harmless — an unsigned image is simply not
+admissible — but it does mean "pushed" never implies "admissible", so a failed signing step
+must fail the job loudly. Sign the **digest** returned by the push, not the tag: a tag can
+be repointed between the compliance check and the signature.
+
+Admission needs no attestation here — the **signature is the gate** (see §2b). Attestation
+(SLSA provenance / a compliance predicate) is optional audit-trail only. The trust root is a
+**CA cert** you manage (bootstrap `notary_ca_certificate`), not Sigstore.
 
 > Mock note: there is no real registry/OIDC in this repo, so the cosign calls in
 > `unikube.yaml` are **stubbed** (echo + a placeholder digest). The step order and the
@@ -160,8 +198,9 @@ the signed statement, which lives in the registry forever), and `source_repo` +
 ## 7. Hands-on — real commands you can run
 
 Tools used below: `docker`, [`crane`](https://github.com/google/go-containerregistry) (works
-without a daemon), `skopeo`, `cosign`, `jq`. Install crane/cosign from their releases; `jq`
-from your package manager.
+without a daemon), `skopeo`, `notation` (our signer), `cosign` (background/comparison), `jq`.
+§7.1–7.2 (digests/layers) are what our compliance check relies on; §7.3–7.6 (cosign) are
+background — our signer is `notation` (§7.7).
 
 ### 7.1 Digest, config, layers
 
@@ -263,21 +302,32 @@ cosign verify-attestation registry.k8s.io/kube-apiserver-amd64:v1.35.0 \
 Kubernetes also documents verifying its release images + binaries end-to-end — see
 "Verify Signed Kubernetes Artifacts" in the docs.
 
-### 7.7 What our `unikube.yaml` would run for real (unstubbed)
+### 7.7 What our `unikube.yaml` would run for real (NOTATION, unstubbed)
 
 ```bash
 IMG="ecr/tenant_Y_image:1.0.0"
-DIGEST=$(crane digest "$IMG")
 
-# sign + attest (keyless via the Actions OIDC identity)
-cosign sign --yes "$IMG@$DIGEST"
-cosign attest --yes --type slsaprovenance --predicate provenance.json "$IMG@$DIGEST"
-cosign attest --yes --type custom          --predicate compliance.json "$IMG@$DIGEST"
+# One-time: trust the CA (matches the Wiz validator's notary_ca_certificate) + register a key
+notation cert add --type ca --store soe ./out/pki/ca.crt
+# (key via a KMS/HSM plugin in prod; file key shown for the local test cert)
+notation key add --plugin <kms-plugin> --id <key-id> soe-signer   # or a file-based key
 
-# the durable pointer we store in <cluster>.compliant.yaml:
-ATT_DIGEST=$(crane digest "$(cosign triangulate "$IMG@$DIGEST" --type attestation 2>/dev/null || echo "$IMG:sha256-...att")")
-echo "attestation_digest=$ATT_DIGEST"
+# PUSH FIRST — the signature is stored in the registry next to the image it refers to.
+docker push "$IMG"
+REF="$(docker inspect --format '{{index .RepoDigests 0}}' "$IMG")"   # ecr/...@sha256:...
+
+# Sign the pushed DIGEST (COSE signature, stored as an OCI artifact via referrers)
+notation sign --signature-format cose --key soe-signer "$REF"
+
+# Verify locally the way Wiz will (against the CA trust store + a trust policy)
+notation verify "$REF"
 ```
+
+`scripts/sign-image.sh` wraps the key-registration + sign half of this (cert/key from env or
+a KMS plugin, expiry-checked); the workflow feeds it the digest from the push step.
+
+No attestation digest to persist — admission is by signature, and the record of "why" is
+the signed artifact in the registry plus the informational scan.
 
 ---
 

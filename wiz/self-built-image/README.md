@@ -17,11 +17,12 @@ On push, the shared workflow:
    it trusts digests, never `LABEL`s,
 3. signs + attests the image (cosign/SLSA — stubbed in the mock),
 4. runs an informational Wiz scan (AUDIT, never blocks), no `wiz tag`,
-5. opens an **auto-merged** PR into `container-vulnerability-exemption` adding this exact
-   image to each target cluster's `<env>/<cluster>.compliant.yaml`, with provenance.
+5. `notation sign`s the image (NOTARY / CA cert) and pushes it — Wiz's shared NOTARY
+   validator then admits it on **every** cluster (no PR, no YAML).
 
-If the base image were **not** on the approved registry, the workflow fails and asks you
-to raise a **manual exemption** PR (which requires security approval).
+If the base image were **not** on the approved registry, the workflow checks each target
+cluster's already-merged `exemptions`; if none matches, it **fails** and asks you to raise a
+**manual exemption** PR (which requires security approval).
 
 See `container-vulnerability-exemption/wiz/project_metadata/image-signing-101.md` for the
 cosign / attestation / image-label background.

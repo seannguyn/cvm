@@ -143,7 +143,7 @@ are admitted by name, no signature needed).
   fallback, no PR). Update `self-built-image/`. Remove the compliant-PR + compliance-bot bits.
 - **CODEOWNERS:** drop the `*.compliant.yaml` / `@org/compliance-bot` rule; exemptions are
   manual again (prod/preprod stricter).
-- **Docs/tests:** update `9_project_summary.md`, READMEs, `image-signing-101.md` (add a
+- **Docs/tests:** update `project_summary.md`, READMEs, `image-signing-101.md` (add a
   Notation/air-gapped section); rework fixtures + tests; `compliance_check.py` tests stay.
 
 ---
@@ -217,6 +217,11 @@ source — Vault? KMS? A specific secret name? (Interface only; values injected 
 <user_response>
 For now just assume local testing. so give script to:
 - Generate CA, private key, csr, signing certificate.
+
+CA.crt should be committed to git, since that will be trusted by any platform, unikube, pck. Any change in CA.crt should trigger re-apply of the bootstrap. 
+
+For now, assume that signing.crt, and signing.key are fetchable from environment variable, so it won't be committed to git. so `- name: Sign (Notation) + push  [compliant]` unikube gha should access these variable and sign accordingly. Make this step into bash script so gha step can just run: `bash scripts/sign-image.sh <image_name>` for example.
+
 </user_response>
 
 **Q9 — unikube scope + push.** Confirm unikube is **self-built only** (vendor/OSS never call
@@ -384,7 +389,7 @@ For image, once trusted timestamping, it should be good for that period of time.
   sign(NOTARY)+push OR exemption-check→push/fail; push creds secrets-or-OIDC stubbed).
   Update `self-built-image/`. Remove compliant-PR/compliance-bot.
 - **CODEOWNERS:** drop the `*.compliant.yaml` bot rule; exemptions manual (prod/preprod stricter).
-- **Docs/tests:** `9_project_summary.md`, READMEs, `image-signing-101.md` (+ Notation/air-gapped
+- **Docs/tests:** `project_summary.md`, READMEs, `image-signing-101.md` (+ Notation/air-gapped
   + cert-expiry-revocation section); rework fixtures/tests; keep `compliance_check.py` tests.
 - **Verify:** validate + pytest + tf brace + yaml parse, all green.
 
