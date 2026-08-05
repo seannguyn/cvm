@@ -10,7 +10,7 @@ exemptions and admission across the unikube fleet. Design notes in `project_meta
 | Repo | Role | Who touches it |
 |------|------|----------------|
 | [`container-vulnerability-exemption`](container-vulnerability-exemption) | YAML **interface** — schema-validated config | Customers + Platform + Security |
-| [`container-vulnerability-exemption-tf`](container-vulnerability-exemption-tf) | Terraform **engine** — creates the Wiz resources (blackbox provider), git-tag versioned | Platform / Security |
+| [`container-vulnerability-exemption.tf`](container-vulnerability-exemption.tf) | Terraform **engine** — creates the Wiz resources (blackbox provider), git-tag versioned | Platform / Security |
 
 The original single-cluster reference the engine module was built from was parked in
 `out/` (a gitignored scratch dir), so it is intentionally **not** committed.
@@ -43,7 +43,7 @@ container-vulnerability-exemption/          # interface (per-platform layout)
   pck/                                      # different team, out of scope (stub)
   .github/workflows/  terraform.yaml unikube.yaml wiz-scan.yaml(parked)
   .github/actions/tf/  action.yaml
-container-vulnerability-exemption-tf/       # engine
+container-vulnerability-exemption.tf/       # engine
   terraform/
     main.tf providers.tf variables.tf versions.tf backend.tf outputs.tf
     modules/cluster_policy_set/             # the 5 objects, one cluster

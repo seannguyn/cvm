@@ -269,7 +269,7 @@ sure. However each signing certificate should have expiry, so when the signing c
   for a validator expiry field — confirm during the Wiz spike.
 
 <user_response>
-Yes expired_at is supported field. I added to wiz/container-vulnerability-exemption-tf/terraform/modules/cluster_policy_set/main.tf for your reference.
+Yes expired_at is supported field. I added to wiz/container-vulnerability-exemption.tf/terraform/modules/cluster_policy_set/main.tf for your reference.
 </user_response>
 
 **EXTRA:** What about attestation? necessary?

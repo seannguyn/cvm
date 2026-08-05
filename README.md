@@ -231,7 +231,7 @@ The [`wiz/`](wiz/) tree implements ADR-0001 and ADR-0002:
 
 - [`wiz/project_metadata/project_summary.md`](wiz/project_metadata/project_summary.md) — current-state entry point.
 - [`wiz/container-vulnerability-exemption/unikube/README.md`](wiz/container-vulnerability-exemption/unikube/README.md) — the YAML interface: exemption schema, local verification.
-- [`wiz/container-vulnerability-exemption-tf/README.md`](wiz/container-vulnerability-exemption-tf/README.md) — the Terraform engine.
+- [`wiz/container-vulnerability-exemption.tf/README.md`](wiz/container-vulnerability-exemption.tf/README.md) — the Terraform engine.
 - [`wiz/project_metadata/image-signing-101.md`](wiz/project_metadata/image-signing-101.md) — digests, labels, signing and cert-expiry primer.
 
 [`kyverno/`](kyverno/) is an empty sibling, kept deliberately: if a revisit trigger fires,

@@ -3,7 +3,7 @@ Actually let's look at a new direction from tweak.md and tweak_PLAN.md
 
 During github action unikube workflow run, when an image is compliant as per standard, if you have to continue to go on and raise compliant PR, that is NOT a good workflow.
 
-Luckily I found out that Wiz `wiz-v2_image_integrity_validator` supports method = `COSIGN` OR `NOTARY`. these 2 methods are mutually exclusive. I add coded here: wiz/container-vulnerability-exemption-tf/terraform/modules/cluster_policy_set/main.tf
+Luckily I found out that Wiz `wiz-v2_image_integrity_validator` supports method = `COSIGN` OR `NOTARY`. these 2 methods are mutually exclusive. I add coded here: wiz/container-vulnerability-exemption.tf/terraform/modules/cluster_policy_set/main.tf
 
 So I'm thinking during unikube workflow, if the image is built in a compliant way (check tweak_PLAN.md for compliance already discussed), signed the image either Cosign or Notary v2 (Notation)
 

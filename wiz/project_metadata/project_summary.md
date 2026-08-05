@@ -4,14 +4,8 @@ The single entry point for understanding this project. Read this, then the two r
 READMEs it points to, and you know the system end to end:
 
 - **[`container-vulnerability-exemption/unikube/README.md`](../container-vulnerability-exemption/unikube/README.md)** — the interface repo (unikube platform): exemption YAML schema, the local verify/plan commands, the scripts. (The repo root README just routes between platforms.)
-- **[`container-vulnerability-exemption-tf/README.md`](../container-vulnerability-exemption-tf/README.md)** — the engine repo: module layout, the Wiz objects, state model, bootstrap, local plan.
+- **[`container-vulnerability-exemption.tf/README.md`](../container-vulnerability-exemption.tf/README.md)** — the engine repo: module layout, the Wiz objects, state model, bootstrap, local plan.
 - **[`image-signing-101.md`](image-signing-101.md)** — the signing / Notation / cert-expiry trust model.
-
-**Document lineage.** This file (`project_summary.md`) reflects the **current** state.
-The latest implementation is described in **[`new_direction_PLAN.md`](new_direction_PLAN.md)**
-(signature-based admission via Notation); `new_direction.md` is its brief. Everything else —
-the superseded `tweak*.md` iterations and the phase-8 + `1`–`7` brainstorming — is archived
-under `project_metadata/history/` for provenance only; do not treat it as current.
 
 ## What this system does
 
@@ -25,11 +19,11 @@ that YAML into Wiz policies via Terraform. Blast radius is one cluster per chang
 | Repo | Role | Who edits it |
 |------|------|--------------|
 | `container-vulnerability-exemption` | YAML **interface** — schema-validated config, CI, CODEOWNERS | Customers + Platform + Security |
-| `container-vulnerability-exemption-tf` | Terraform **engine** — creates the Wiz resources, git-tag versioned | Platform / Security |
+| `container-vulnerability-exemption.tf` | Terraform **engine** — creates the Wiz resources, git-tag versioned | Platform / Security |
 
 Each platform is scoped under its own directory in the interface repo
 (`unikube/{exemptions,schemas,scripts,tests}`; `pck/` is a stub for a future team), and
-all engine Terraform lives under `container-vulnerability-exemption-tf/terraform/`.
+all engine Terraform lives under `container-vulnerability-exemption.tf/terraform/`.
 
 One thing deliberately sits at the interface repo's **root** rather than under a platform:
 `trust/ca.crt`, the Notation CA certificate the shared validator verifies signatures
@@ -199,7 +193,7 @@ auto-merged file. `pck/` is out of scope. See `container-vulnerability-exemption
 - Exemption YAML shape, `operator` semantics, local verify + `local_tf.sh` →
   [`container-vulnerability-exemption/unikube/README.md`](../container-vulnerability-exemption/unikube/README.md).
 - Engine module/bootstrap (shared validator + remote-state read), full bootstrap run,
-  provider notes → [`container-vulnerability-exemption-tf/README.md`](../container-vulnerability-exemption-tf/README.md).
+  provider notes → [`container-vulnerability-exemption.tf/README.md`](../container-vulnerability-exemption.tf/README.md).
 - Signing / Notation / cert-expiry trust model → [`image-signing-101.md`](image-signing-101.md).
 - Trust-root custody, what is/isn't in git, CA-rotation cutover →
   [`container-vulnerability-exemption/trust/README.md`](../container-vulnerability-exemption/trust/README.md).
