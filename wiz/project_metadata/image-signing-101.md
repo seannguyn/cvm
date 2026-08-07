@@ -1,5 +1,9 @@
 # Image labels, digests, cosign & attestation — a 101
 
+> This is the conceptual primer. For the Notation **operational** detail — what each
+> verification level enforces, why our PKI has three tiers, rotation deadlines, and what a
+> leaked key at each tier buys an attacker — see [`notation-signing.md`](notation-signing.md).
+
 A from-scratch explainer for the trust model behind the compliance workflow. Read top to
 bottom; each section builds on the last. The punchline: **trust digests and signatures,
 never labels.**
@@ -171,6 +175,17 @@ The unikube workflow (`.github/workflows/unikube.yaml`) does, per target cluster
 3. **Static** base-image check — every `FROM` must be `container-soe.registry.domain/*`.
 4. **Authoritative** check — `docker inspect` the built image's base-layer **digests** +
    the final base image's `.Created` (freshness ≤ 30 days). **Digests, not labels.**
+   Steps 3 and 4 are both `compliance_check.py`: it shells out to docker itself, so the
+   rules live in one place rather than half in a script and half in workflow YAML. If
+   docker cannot answer, the verdict is **not compliant** (fail closed) — "compliant" means
+   signed and admitted fleet-wide unattended, so it must never be the fallback.
+
+   Note the trust boundary on `.Created`: it is part of the image config, so it is covered
+   by the digest and cannot be altered after the fact — but it is chosen by whoever built
+   the base. That is acceptable only because bases are restricted to
+   `container-soe.registry.domain/*`, i.e. our own SOE team. It would be worthless for a
+   third-party base. This is a weaker guarantee than the layer-digest check and a different
+   one from "never trust labels" (labels are set by the *tenant*, on their own image).
 5. **Branch:**
    - **Compliant** → `docker push`, then `notation sign` the pushed **digest** (NOTARY / CA
      cert). Wiz's shared NOTARY validator verifies the signature at admission → admitted
@@ -308,7 +323,7 @@ Kubernetes also documents verifying its release images + binaries end-to-end —
 IMG="ecr/tenant_Y_image:1.0.0"
 
 # One-time: trust the CA (matches the Wiz validator's notary_ca_certificate) + register a key
-notation cert add --type ca --store soe ./out/pki/ca.crt
+notation cert add --type ca --store soe ./trust/ca.crt   # the ROOT — never the intermediate
 # (key via a KMS/HSM plugin in prod; file key shown for the local test cert)
 notation key add --plugin <kms-plugin> --id <key-id> soe-signer   # or a file-based key
 
@@ -319,9 +334,19 @@ REF="$(docker inspect --format '{{index .RepoDigests 0}}' "$IMG")"   # ecr/...@s
 # Sign the pushed DIGEST (COSE signature, stored as an OCI artifact via referrers)
 notation sign --signature-format cose --key soe-signer "$REF"
 
-# Verify locally the way Wiz will (against the CA trust store + a trust policy)
+# Verify locally the way Wiz will — trust store AND trust policy; `notation verify`
+# refuses to run without a policy. Verify against the COMMITTED trust/ca.crt, not the
+# out/pki copy, or you are only proving the leaf matches the CA that just issued it.
+notation cert add --type ca --store soe ./trust/ca.crt
+notation policy import ./trustpolicy.json     # registryScopes, trustStores: ["ca:soe"],
+                                              # trustedIdentities pinned to the signer CN
 notation verify "$REF"
 ```
+
+`trustedIdentities: ["*"]` would accept **any** leaf the CA ever issues; pin the signer's
+subject instead. `signatureVerification.level: strict` enforces cert expiry — an image
+signed by an expired leaf fails verification, which is exactly the revocation behaviour we
+rely on (§ cert expiry). Full worked example: `unikube/README.md` step 4c.
 
 `scripts/sign-image.sh` wraps the key-registration + sign half of this (cert/key from env or
 a KMS plugin, expiry-checked); the workflow feeds it the digest from the push step.

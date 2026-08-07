@@ -82,16 +82,23 @@ established key-custody practice (HSM/KMS).
   proofs are bundled. Behind a proxy allowlist that is a set of external dependencies on the
   build-and-admit path, each with its own outage mode. Notation's verification is a local
   chain-validation against a CA cert we hold.
-- **It reuses key custody we already have.** Notation's plugin model targets HSM/KMS
-  directly; the CA, the issuance process, and the audit expectations already exist.
+- **It fits our key-custody model.** Notation's plugin model targets HSM/KMS directly, so the
+  signing key never reaches a runner. Note this is *not* "we reuse the org CA" — see
+  ADR-0003, which forced a standalone signing root. The org's HSM/KMS practice and audit
+  expectations still apply; the certificate hierarchy does not.
 - **Cert expiry gives coarse revocation for free.** We deliberately do **not** trust-timestamp
-  signatures, so when the ~90-day signing leaf expires, images signed by it stop being
-  admissible. This is a blunt instrument and we accept it as one.
+  signatures, so verification checks the leaf's validity window against *now* — meaning when
+  the signing leaf expires, every image it signed stops being admissible. This is a blunt
+  instrument and we accept it as one. Note the leaf is **365 days**, so the blunt instrument
+  is now year-scale: a leaked leaf key stays usable until it expires. If that becomes the
+  binding concern, the fix is real revocation (CRL/OCSP reachable from the Wiz admission
+  controller — unverified) or a shorter leaf, not a change of signing format.
 
 ### Consequences
 
-- We own the PKI: issuance, ~90-day leaf rotation, and CA custody are ours to run. Sigstore's
-  main selling point — no long-lived keys to leak — is a real benefit we are giving up.
+- We own the PKI: issuance, annual leaf rotation, and CA custody are ours to run — and per
+  ADR-0003 that means a *separate* CA hierarchy, not the org's. Sigstore's main selling
+  point — no long-lived keys to leak — is a real benefit we are giving up.
 - No transparency log. There is no public, tamper-evident record of what was signed; the
   audit trail is the registry plus our own CI logs.
 - **Not** an air-gap argument. Egress is restricted, not absent — a self-hosted Sigstore
@@ -202,6 +209,68 @@ Reopen this decision if any of these become true:
 - The dual-webhook arrangement causes a production admission outage.
 - Risk 1 resolves badly — i.e. a Wiz backend outage can block deployments fleet-wide with no
   cached-policy fallback.
+- Wiz adds signer-identity pinning to `image_integrity_validator` (see ADR-0003 — this would
+  let us fold the signing CA back under the org root and retire a whole PKI).
+
+---
+
+## ADR-0003 — A standalone signing CA, three tiers
+
+**Status:** Accepted · Consequence of ADR-0002
+
+### Context
+
+The organisation runs an internal root CA, and the obvious move was to sign images with a
+certificate issued by it. That turns out to be unsafe **given the enforcement point we chose
+in ADR-0002**.
+
+`wiz-v2_image_integrity_validator` exposes exactly one field: `certificate`. It is a trust
+store and nothing else — there is no equivalent of Notary's `trustedIdentities`, which is the
+mechanism that would let us trust a broad CA while restricting *which signer* under it counts.
+
+Without that, a CA is not an authorization boundary. Trusting the org root would mean
+trusting every certificate the organisation issues: any team with an org-issued cert could
+sign an image and have it admitted on all ~200 clusters, unattended, in both tenants.
+
+### Options
+
+**A — org root in the trust store.** Rejected: fleet-wide privilege escalation, as above.
+Would be the best option *if* Wiz supported identity pinning, which is why that is now a
+revisit trigger on ADR-0002.
+
+**B1 — a dedicated intermediate under the org root, placed in the trust store.** Keeps org
+key custody. Rejected on two grounds: the Notary spec advises against intermediates as trust
+anchors because *"[it] is a form of certificate pinning that can break signature verification
+unexpectedly anytime the intermediate certificate is rotated"*, and that intermediate would
+rotate on the org PKI's schedule, making a fleet-wide cutover something another team triggers.
+
+**B2 — a standalone signing root, used only for image signing.** Chosen.
+
+### Decision
+
+A **standalone three-tier PKI**: offline root (10y) → issuing intermediate (5y) → signing
+leaf (~365d). The **root** is the trust anchor in `trust/ca.crt`; the intermediate does
+day-to-day issuance; only the leaf is short-lived and reaches CI.
+
+Three tiers specifically because the trust store is the *only* lever Wiz gives us, so the
+anchor must be stable. Leaf and intermediate rotation both leave `trust/ca.crt` untouched —
+no Wiz change, no bootstrap apply, nothing already signed invalidated. Only root replacement
+is a hard cutover, and roots last a decade.
+
+### Consequences
+
+- **A second PKI to run.** Issuance, rotation and root custody are ours. It needs the
+  security/PKI team's sign-off as an approved internal CA even though it does not chain to
+  theirs. This weakens — but does not overturn — ADR-0001's key-custody rationale: we still
+  use the org's HSM/KMS practice, just not its certificate hierarchy.
+- **The root key is the crown jewel.** Whoever holds it can mint an intermediate and admit
+  anything, anywhere, in both tenants. Offline, HSM-backed, from day one.
+  `gen_signing_certs.sh` generates keys on disk and is test material only.
+- **Signatures must carry the complete chain** (leaf → intermediate → root); a bare leaf
+  signs successfully and then fails verification at admission. `sign-image.sh` refuses one.
+- **DN discipline is kept regardless** (`C`, `ST`, `O`, `OU` on every leaf). Wiz cannot use
+  it today, but it makes local `notation verify` a real check and is a prerequisite for both
+  revisit paths — Wiz adding pinning, or a move to Kyverno, which supports it today.
 
 ---
 

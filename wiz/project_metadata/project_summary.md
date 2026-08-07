@@ -6,6 +6,7 @@ READMEs it points to, and you know the system end to end:
 - **[`container-vulnerability-exemption/unikube/README.md`](../container-vulnerability-exemption/unikube/README.md)** — the interface repo (unikube platform): exemption YAML schema, the local verify/plan commands, the scripts. (The repo root README just routes between platforms.)
 - **[`container-vulnerability-exemption.tf/README.md`](../container-vulnerability-exemption.tf/README.md)** — the engine repo: module layout, the Wiz objects, state model, bootstrap, local plan.
 - **[`image-signing-101.md`](image-signing-101.md)** — the signing / Notation / cert-expiry trust model.
+- **[`notation-signing.md`](notation-signing.md)** — Notation operational reference: the three clocks (cert validity / TSA / signature expiry), what verification enforces at each level, why the PKI has three tiers, and which rotations have deadlines.
 
 ## What this system does
 
@@ -119,11 +120,12 @@ The concrete use cases:
 **1. Tenant admits a self-built image (in their own repo).**
 Call the reusable `unikube.yaml` (`image`, `tag`, `target_clusters`). **Once** (not per
 target — there is one image): build → informational Wiz scan (golden AUDIT) → compliance
-check (every `FROM` on `container-soe.registry.domain/*` + post-build base-layer **digests**
+check — one call to `compliance_check.py`, which owns every rule and runs `docker inspect`
+itself (every `FROM` on `container-soe.registry.domain/*` + post-build base-layer **digests**
 + freshness ≤ 30 days; digests, not labels). Then branch:
 
 - **Compliant** → push, then `scripts/sign-image.sh` signs the pushed **digest**
-  (`notation sign`; leaf cert + key from CI env or an HSM/KMS plugin). Admitted fleet-wide by
+  (`notation sign`; leaf cert chain + key from CI env). Admitted fleet-wide by
   the shared NOTARY validator; no PR, no YAML, and `target_clusters` is not consulted at all.
 - **Not compliant** → `check_exemption.py` runs for **every** entry in `target_clusters`
   against the already-merged `exemptions`, **before** any registry contact. All covered →
@@ -163,7 +165,7 @@ Edit `unikube/exemptions/golden.yaml` (`vuln_params`) → PR → merge. Matrix =
 only** (re-applies the informational `cst-container-vuln-default`). Clusters don't consume it,
 so **no cluster fan-out**.
 
-**7. Rotate the signing leaf (routine, ~90 days).**
+**7. Rotate the signing leaf (routine, ~365 days).**
 Re-issue `signing.crt`/`signing.key` from the same CA and update the CI secrets (or the KMS
 key). **No terraform, no PR in either repo** — `trust/ca.crt` is unchanged, so the validator
 is untouched. Because signatures are **not** timestamped, images signed by an **expired**
@@ -195,19 +197,21 @@ auto-merged file. `pck/` is out of scope. See `container-vulnerability-exemption
 - Engine module/bootstrap (shared validator + remote-state read), full bootstrap run,
   provider notes → [`container-vulnerability-exemption.tf/README.md`](../container-vulnerability-exemption.tf/README.md).
 - Signing / Notation / cert-expiry trust model → [`image-signing-101.md`](image-signing-101.md).
+- Notation operational reference — what verification checks, PKI topology, rotation deadlines,
+  key-compromise blast radius, Wiz spike questions → [`notation-signing.md`](notation-signing.md).
 - Trust-root custody, what is/isn't in git, CA-rotation cutover →
   [`container-vulnerability-exemption/trust/README.md`](../container-vulnerability-exemption/trust/README.md).
 
 ## Follow-ups (out of scope / stubbed)
 
 - **Signing is real but unexercised.** `scripts/sign-image.sh` invokes `notation` for real
-  (file key, or an HSM/KMS plugin via `NOTATION_PLUGIN`), and validates/expiry-checks the
+  (file keys only — HSM/KMS plugin custody is a PKI-team follow-up), and validates/expiry-checks the
   leaf; it has never run against a live registry or a real Notation install in CI. The
   runner still needs `notation` installed and registry credentials. `docker inspect`
   base-digest/freshness verification and the registry push (secrets or OIDC) remain stubbed.
 - **Leaf custody.** `trust/ca.crt` is settled (in git, security-owned). Still open: where the
   **signing leaf** lives in CI — plain GitHub secrets vs. an HSM/KMS plugin — and who runs
-  the 90-day re-issue.
+  the annual re-issue.
 - **Real state backend.** Wire an actual S3 bucket + DynamoDB lock and the bootstrap/import
   path for ~200 clusters × 2 tenants.
 - **CA rotation has no overlap window.** `notary_v2.certificate` holds a single trust anchor.
