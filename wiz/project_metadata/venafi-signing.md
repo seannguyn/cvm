@@ -395,6 +395,11 @@ label. Concretely, ours would likely be `unikube-image-signer` for both the envi
 label. **Nothing here is a value we choose at sign time — three of the four are outputs of §5
 setup**, which is why §5 has to happen first.
 
+**Runnable walkthrough:** [`../venafi-local-demo/`](../venafi-local-demo/) is a copy-paste
+tutorial that does this on a laptop — local registry, build, push, sign, inspect, verify — with
+**Option 1 (self-signed, works today)** and **Option 2 (Venafi plugin)** side by side, so the diff
+between them is concrete. Its §2.6 is the **Q6 chain test**.
+
 **Guard rails to keep:**
 
 - **Complete chain** — the plugin builds the envelope (`SIGNATURE_GENERATOR.ENVELOPE`) and sources
