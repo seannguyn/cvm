@@ -35,7 +35,7 @@ Answered items get folded into the body. **[ASSUMED]** marks a load-bearing gues
 - Your high-level plan is reviewed in [§10](#10-high-level-plan--reviewed), with the corrected
   end-to-end sequence in [§10.6](#106-the-corrected-sequence) — that table is the thing to take
   to the PKI team.
-- **TPP → TPF rebrand confirmed** ([§10.1](#101-namingyoure-correct-verified)); your reading of
+- **TPP → TPF rebrand confirmed** ([§10.1](#101-naming--youre-correct-verified)); your reading of
   the 26.1 docs was right.
 - **ADCS is my assumption, not a verified fact about your org** — now marked as such
   ([§10.2](#102-which-ca--correct-to-ask-and-yes-adcs-is-my-assumption-assumed)).
@@ -336,17 +336,24 @@ Two traps in case 3 worth knowing before you choose it:
   year — **cannot be revoked**. Regular *approvals* can be cancelled; pre-approvals cannot. Prefer
   case 1 with tight token control and IP restrictions over a long unlimited pre-approval.
 
-### 5.7 Timestamping — **RESOLVED, off**
+### 5.7 Timestamping — **off, but conditionally**
 
 > **A (Bob, 2026-08-11):** *"No need timestamping if it is worthless. Image expiring on leaf
 > certificate expiry is fine."*
 
-Agreed and settled. To be precise about *why*, since it's counter-intuitive and someone will
-challenge it later: timestamping isn't worthless in general — it's actively harmful *here*.
-Certificate expiry is our only revocation mechanism, and it works because an attacker can't
-extend it. A timestamped signature survives certificate expiry indefinitely, so enabling it would
-mean a leaked key is usable **forever** rather than for ≤365 days. Put that reason in the config
-comment.
+Off for now, and the *why* matters because someone will challenge it later: timestamping isn't
+worthless in general — it's actively harmful **given our current constraints**. Certificate expiry
+is our only revocation mechanism, and it works because an attacker can't extend it. A timestamped
+signature survives certificate expiry indefinitely, so enabling it today would mean a leaked key is
+usable **forever** rather than for ≤365 days. Put that reason in the config comment.
+
+**But "image expiring on leaf certificate expiry is fine" is worth re-examining** — §6.5 works
+through what it actually costs, and it's more than it sounds: images signed late in the leaf's life
+get only the remainder, and every image under a given leaf becomes unadmissible simultaneously.
+
+So this decision is **conditional on Q3**. If the signing certificate can carry CDP/AIA with
+working CRL/OCSP, revocation no longer depends on expiry, timestamping becomes safe, and the entire
+re-signing burden disappears. Revisit if Q3 lands.
 
 ---
 
@@ -431,6 +438,65 @@ has no identity field either. It buys CI-side checking and optionality if **Wiz*
 > (`trust/ca.crt`) plus one bootstrap apply; `sign-image.sh` gains the plugin path; workflow
 > secrets change; zero cluster re-applies.
 
+### 6.5 The expiry cliff — an operational cost not previously stated
+
+Raised by Bob, 2026-08-11, and the analysis above understated it. Because signatures are not
+timestamped, **image admissibility is pinned to the leaf's `notAfter`, not to signing time**:
+
+- Sign on day 0 of a 365-day leaf → 365 days of admissibility.
+- Sign on day 300 → **65 days**.
+- Every image signed under that leaf becomes unadmissible **at the same instant**, regardless of
+  when it was signed. It is a cliff, not a per-image sliding window.
+
+Rotating the leaf on schedule does *not* rescue images already signed under the old one — new
+builds get the new certificate; existing signatures still die on the old certificate's `notAfter`.
+Earlier rounds described leaf rotation as having "no fleet impact"; that is true **at the gate**
+(no cluster re-applies, no trust-anchor change) but **not** for the deployed estate.
+
+Three mitigations, all needed:
+
+1. **Re-sign, don't replace.** An image can carry multiple Notation signatures as separate referrer
+   artifacts, and verification succeeds if any one validates. On renewal, re-sign existing digests
+   under the new leaf and leave the old signature in place — no rebuild, no flag day.
+2. **Renew far more often than the certificate lives.** Because renewals overlap (each certificate
+   runs to its own `notAfter`; new signatures use the newest), the floor is:
+
+   ```
+   minimum admissibility = certificate validity − renewal interval
+   ```
+
+   A 365-day leaf renewed annually gives a late-signed image ~0 days. Renewed **quarterly** it
+   guarantees ~275 days. Each renewal is a TPP-side operation on the same environment — same label,
+   same subject, **no CI change, no secret to update**. This is the cheapest lever available and it
+   is currently unspecified in the design.
+3. **Lean on the rebuild cadence.** Images rebuilt monthly for CVE patching are re-signed as a side
+   effect. In effect **the leaf lifetime sets a maximum shelf life for a deployed image** — which
+   is arguably a feature, since it turns "not rebuilt in a year" into a deployment failure rather
+   than a silent risk.
+
+**Considered and rejected: a fresh leaf per signature.** It fixes the leaf tier — every image would
+get a full 365 days from its own signing time — but (a) it only relocates the cliff, since a leaf
+can't outlive its issuer and every image under a given intermediate still dies together on the
+intermediate's `notAfter`; (b) a CodeSign Protect Environment holds one key and one certificate, so
+per-build issuance means a CA enrollment per build and thousands of untracked code-signing
+certificates a year; and (c) if the key is reused it buys nothing, and if it isn't, it's HSM keygen
+per pipeline run against a threat (key theft) that non-exportable keys already close. Adjacent to
+the "why not mint an intermediate per build" reasoning already in
+[`notation-signing.md` §4](notation-signing.md).
+
+New work this implies: an inventory of what's deployed and when it was signed (`notation inspect`
+gives `signingTime`), alerting on the **old** certificate's `notAfter` rather than on renewal, and
+an owner for re-signing — which is not a build-time action and won't be triggered by any code
+change.
+
+**This also changes the weight of Q3.** The cliff is the strongest argument for timestamping, which
+we reject only because expiry is currently our sole revocation mechanism. That trade is
+conditional: **if the signing certificate can carry CDP/AIA with working CRL/OCSP, timestamping
+becomes viable** — real revocation replaces expiry as the kill switch, and we get durable
+signatures *and* revocability. Q3 was framed as "closes the revocation gap"; it is better framed as
+"unlocks a materially simpler operational model". It should be asked early, not treated as a
+nice-to-have.
+
 ---
 
 ## 7. Your summary, checked
@@ -463,7 +529,7 @@ long after the fact, on a cluster; `notation verify` tells you *why*, in the bui
 |---|---|---|---|
 | Q1 | Which CA backs TPP; can it host a dedicated hierarchy? | PKI | **RESOLVED** → §5.1. TPP is CA-agnostic (8 connector types). Confirm *which* one this org uses. |
 | Q2 | Can it issue the Notary code-signing leaf profile? | PKI | **RESOLVED** → §5.3. Profile comes from the ADCS certificate template; the built-in Code Signing template already matches. |
-| Q3 | Can the dedicated root carry **CDP/AIA** with CRL/OCSP? | PKI | **OPEN** — highest value. See §3 for what this means. |
+| Q3 | Can the dedicated root carry **CDP/AIA** with CRL/OCSP? | PKI | **OPEN — highest value, and higher than first assessed.** Not just "closes the revocation gap": it is the precondition for timestamping, which would remove the expiry cliff entirely (§6.5). Ask early. |
 | Q4 | Can Wiz's admission controller reach CRL/OCSP through the proxy allowlist? | Platform | **OPEN** — only matters if Q3 lands. Separate from "does Wiz block", see correction ③. |
 | Q5 | Does anything enforce the issuer clamp? | PKI | **PARTIAL** → §5.4. Assume silent truncation; keep the CI check. Confirm ADCS behaviour. |
 | Q6 | Full chain or bare leaf from the environment? | TPP admin | **OPEN** — not documented. Test with `notation inspect`. Still the likeliest cause of a green build and a rejected image. |
@@ -471,9 +537,10 @@ long after the fact, on a cluster; `notation verify` tells you *why*, in the bui
 | Q8 | Does Wiz evaluate **every** `notary_v2` entry, or only the first? And does `trust/ca.crt` need to become multi-file? | Wiz / Platform | **OPEN** — promoted. Decides whether root rotation gets an overlap window (correction ②). |
 | Q9 | Token lifetime — per-run OAuth grant, or long-lived secret? | Platform | **PARTIAL** — egress confirmed. Grant type still open; matters more now the token is the recoverable lock (§1). |
 | Q10 | Prod/non-prod separate environments? | Security | **RESOLVED** — one shared CA, compliance-based. Consider separate *environments* under one hierarchy anyway, for per-env IP restrictions and audit separation. |
+| Q11 | What **renewal interval** is set on the environment, and can it be set well below the certificate's validity? | TPP admin | **OPEN — new, and the cheapest lever available.** Worst-case admissibility is `validity − renewal interval` (§6.5). Annual renewal of an annual certificate leaves late-signed images with almost no life; quarterly renewal fixes it with no CI change and no secret rotation. |
 
 **Now blocking:** Q3 (ask alongside the §5 request — it's cheap at build time, expensive later),
-Q6 (test), Q8 (test).
+Q6 (test), Q8 (test). **Q11 is cheap and should go in the same conversation as Q3.**
 
 ---
 
@@ -482,7 +549,7 @@ Q6 (test), Q8 (test).
 | Date | Decision | By |
 |---|---|---|
 | 2026-08-11 | **Option A — dedicated root.** Org root rejected: Wiz has no identity pinning, so the anchor is the authorization boundary. | Bob |
-| 2026-08-11 | **No timestamping.** Certificate expiry is the intended revocation mechanism. | Bob |
+| 2026-08-11 | **No timestamping** — *conditional on Q3.* Certificate expiry is the intended revocation mechanism while no CRL/OCSP exists. Revisit if CDP/AIA lands: it would remove the expiry cliff (§6.5). | Bob |
 | 2026-08-11 | Kyverno is **not** a future fix — same one-control limitation as Wiz. | analysis |
 | — | Flow type for the CI environment (no-approval vs pre-approval) — **pending** | |
 

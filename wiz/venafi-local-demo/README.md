@@ -1,64 +1,240 @@
-# Signing a container image with Notation — a local tutorial
+# Notation image signing — certificate requirements + local tutorial
 
-Run this on a Mac or Linux laptop. You build an image, push it to a registry on localhost, and
-sign it two different ways:
+**Start with [§1](#1-certificate-requirements). Before wiring anything to Venafi, confirm the
+certificates you were given can actually be used.** Notation enforces a strict X.509 profile **at
+signing time**, so a non-conforming certificate fails immediately — and the fix lives in the
+issuing CA's template, not in Venafi.
 
-- **[Option 1 — self-signed CA](#option-1--self-signed-ca)**: keys on your filesystem. No external
-  dependencies. Works right now.
-- **[Option 2 — Venafi CodeSign Protect](#option-2--venafi-codesign-protect)**: the key lives in
-  an HSM and never reaches your machine. Needs setup on the Venafi side first.
-
-Do the [prerequisites](#prerequisites) once, then either option. Doing both back to back is the
-point — the diff between them is the whole argument.
-
-Option 1 ends by signing **two** images with **two different teams' certificates** under one CA
-([1.6](#16-a-second-image-signed-by-a-second-leaf)–[1.7](#17-now-pin-the-signer--and-see-what-wiz-cant-do)).
-That pair is the most useful thing in this folder: it reproduces, on a laptop, the exact reason
-the trust anchor cannot be a shared corporate root.
-
-This folder is self-contained. Everything you need is here.
+The rest is a runnable tutorial: build an image, push it to a local registry, sign it with a
+self-signed CA ([§4](#4-option-1--self-signed-ca)), then with Venafi
+([§5](#5-option-2--venafi-codesign-protect)).
 
 ```
-Dockerfile             a trivial image, just to have something with a digest to sign
-gen-signing-certs.sh   builds the test PKI for Option 1
-README.md              this file
+check-notary-profile.sh   checks any chain against the profile in §1     <- run this first
+gen-signing-certs.sh      builds a conforming test PKI for Option 1
+Dockerfile                trivial image, just to have a digest to sign
 ```
+
+Self-contained; nothing here references files outside this folder.
 
 ---
 
-## Background — why any of this
+## 1. Certificate requirements
 
-A Kubernetes admission controller can be configured to reject images that aren't signed. It
-verifies a signature by checking that the signing certificate's chain terminates in a CA
-certificate you gave it in advance — the **trust anchor**.
+Source: [Notary Project signature specification — Certificate Requirements][spec]. These are
+validated **both when signing and when verifying**, and apply to every certificate in the chain.
 
-Three consequences drive everything below.
+[spec]: https://github.com/notaryproject/specifications/blob/main/specs/signature-specification.md#certificate-requirements
 
-**The trust anchor is an authorization boundary, not just an identity check.** Our admission
-controller (Wiz) accepts exactly one input: which CA certificate(s) to trust. It has no way to
-also say *"and only if the signing certificate is this specific one"* — the Notary spec calls
-that `trustedIdentities`, and Wiz doesn't implement it. So **anything that chains to the anchor is
-admitted, fleet-wide**. That's why the anchor must be a CA used for nothing but image signing,
-rather than a general-purpose corporate root that issues certificates to every team.
+### 1.1 The profile
 
-**Certificate expiry is the revocation mechanism.** We deliberately do not use trusted
-timestamping. Without it, verification requires every certificate in the chain to be valid *right
-now*, so a leaked signing key stops being useful when its certificate expires — a bound the
-attacker cannot extend. A timestamped signature, by contrast, survives its certificate's expiry
-indefinitely. This is counter-intuitive and gets "fixed" by well-meaning people; don't enable
-timestamping.
+**Every certificate — root, intermediate and leaf:**
 
-**The signing key is the crown jewel.** Whoever holds it can get any image admitted anywhere, for
-up to a year, with no audit trail. Option 1 leaves that key on a filesystem. Option 2 is how you
-stop doing that.
+| Requirement | Rule |
+|---|---|
+| `keyUsage` | MUST be present and **MUST be marked critical** |
+| Signature algorithm | MUST NOT be `sha1WithRSA` or `ecdsa-with-SHA1` anywhere in the chain |
+| Validity | every certificate MUST be valid at signing time — and, with no timestamping, at *verification* time too |
+
+**Root and intermediate (CA certificates):**
+
+| Extension | Rule |
+|---|---|
+| `basicConstraints` | MUST be present, **MUST be critical**, `cA = TRUE` |
+| `pathLenConstraint` | OPTIONAL; if present, must accommodate the depth below it |
+| `keyUsage` | MUST contain `keyCertSign`. `cRLSign` is permitted |
+
+**Leaf (the signing certificate):**
+
+| Extension | Rule |
+|---|---|
+| `basicConstraints` | OPTIONAL; if present, `cA = FALSE` |
+| `keyUsage` | MUST contain `digitalSignature` |
+| `keyUsage` — forbidden | MUST NOT contain `keyCertSign`, `cRLSign`, `keyEncipherment`, `dataEncipherment`, `keyAgreement`, `encipherOnly`, `decipherOnly` |
+| `extendedKeyUsage` | OPTIONAL; MAY contain `codeSigning`. MUST NOT contain `serverAuth`, `clientAuth`, `emailProtection`, `timeStamping`, `anyExtendedKeyUsage` |
+| Key length | RSA ≥ 2048 bits, ECDSA ≥ 256 bits |
+
+**The chain itself:**
+
+- Ordered leaf → intermediate(s) → root, and MUST include the root.
+- MUST NOT chain to multiple parents, and MUST NOT contain unrelated certificates.
+- Only `basicConstraints`, `keyUsage` and `extendedKeyUsage` are evaluated. All other extensions
+  are ignored, so anything else on the certificate is harmless.
+
+> **Why `critical` matters.** A critical extension is one a client must either understand or
+> reject. Marking `keyUsage` critical means no verifier can silently skip the check that this key
+> is allowed to sign. It's a single bit, and it's the most common defect.
+
+### 1.2 Beyond the spec — what this setup also needs
+
+Not enforced by Notation, but each will bite later:
+
+| Requirement | Why |
+|---|---|
+| Key type is RSA **2048/3072/4096** or EC **256/384/521** | The Venafi notation plugin supports only these. CodeSign Protect will happily issue Ed25519 or RSA-8192 keys, which the plugin cannot use. |
+| Leaf validity ≈ **365 days** | With no timestamping, leaf lifetime *is* how long a signed image stays deployable. |
+| Full subject DN — `C`, `ST`, `O`, `OU` | A leaf with only `CN` and `O` cannot be pinned by a valid `trustedIdentities` policy. Costs nothing now, impossible to retrofit. |
+| A root used **only** for image signing | The trust anchor is an authorization boundary — see [§2](#2-why-the-trust-anchor-matters). |
+
+### 1.3 Check the certificates you were given
+
+```bash
+./check-notary-profile.sh leaf.chain
+# or, for separately retrieved files:
+./check-notary-profile.sh leaf.crt intermediate.crt root.crt
+```
+
+It splits the chain, classifies each certificate as CA or leaf from its `basicConstraints`,
+applies the rules for that tier, and exits non-zero if anything fails:
+
+```
+[1] leaf: C = US, ST = WA, O = ..., CN = Team-Image-Signing
+   FAIL  keyUsage present but NOT critical  <-- MUST be critical
+   PASS  basicConstraints CA:FALSE
+   PASS  keyUsage contains digitalSignature
+[2] CA: ... CN = Team-Image-Signing-Intermediate-1
+   FAIL  keyUsage present but NOT critical  <-- MUST be critical
+```
+
+**Check the whole chain, not just the certificate named in an error message.** A misconfigured
+template usually breaks several tiers at once, and each re-issue is a round trip through another
+team.
+
+By hand, the word `critical` is the whole point:
+
+```bash
+openssl x509 -in leaf.crt -noout -text | grep -A1 "X509v3 Key Usage"
+```
+
+```
+X509v3 Key Usage: critical      <-- correct
+    Digital Signature
+
+X509v3 Key Usage:               <-- the defect
+    Digital Signature
+```
+
+A known-good reference is available locally — `./gen-signing-certs.sh` produces a chain that passes
+every rule above. This is exactly what `openssl x509 -noout -text` should print for each tier:
+
+```
+ROOT                                        INTERMEDIATE
+  X509v3 Basic Constraints: critical          X509v3 Basic Constraints: critical
+      CA:TRUE, pathlen:1                          CA:TRUE, pathlen:0
+  X509v3 Key Usage: critical                  X509v3 Key Usage: critical
+      Certificate Sign, CRL Sign                  Certificate Sign, CRL Sign
+  Signature Algorithm: sha256WithRSAEncryption
+
+LEAF
+  X509v3 Basic Constraints: critical
+      CA:FALSE
+  X509v3 Key Usage: critical
+      Digital Signature                     <- and nothing else
+  X509v3 Extended Key Usage:
+      Code Signing                          <- and nothing else
+  Public-Key: (4096 bit)
+  subject=C = US, ST = WA, O = ExampleOrg, OU = Platform-Unikube, CN = unikube-image-signer
+```
+
+Note `Certificate Sign` is openssl's rendering of `keyCertSign`, and `CRL Sign` of `cRLSign`.
+Putting this side by side with the certificates you were given is the fastest way to spot the
+difference.
+
+### 1.4 If the certificates fail
+
+The symptom, at signing time:
+
+```
+error: failed to sign with the plugin venafi-csp: generated signature failed verification:
+certificate chain is invalid, certificate with subject "...": key usage extension must be
+marked critical
+```
+
+**This cannot be fixed by re-issuing in Venafi.** Venafi submits a CSR; the **issuing CA** decides
+which extensions appear and whether they are critical, according to its **certificate template**.
+Re-enrolling against an unchanged template reproduces the same certificate. The template must
+change first. On Microsoft ADCS: *Certificate Template → Properties → Extensions → Key Usage →
+Edit → "Make this extension critical"*.
+
+Cost depends on which tier is wrong:
+
+| Faulty tier | Fix | Impact |
+|---|---|---|
+| Leaf | fix template, re-enroll the environment's certificate | small — same label, nothing else changes |
+| Intermediate | fix profile, re-issue intermediate, then the leaf | moderate — **trust anchor unchanged** |
+| Root | regenerate the root | **new trust anchor**, everything below re-issued |
+
+**If the root is wrong, now is the cheapest moment to find out** — nothing is signed, no anchor is
+deployed. The same discovery after go-live is a fleet-wide re-signing event. Say so when you
+report it.
+
+<details>
+<summary><b>Request to send to the PKI team</b></summary>
+
+> **Subject: Team-Image-Signing certificates need `keyUsage` marked critical — template change,
+> not a re-issue**
+>
+> The code-signing certificates for the `Team Image Signing` project can't be used for container
+> image signing as issued. Notation rejects the chain at signing time:
+>
+> ```
+> certificate chain is invalid, certificate with subject "<SUBJECT>":
+> key usage extension must be marked critical
+> ```
+>
+> The certificates are valid X.509 — the issue is that **`keyUsage` is not marked critical**,
+> which the Notary Project signature specification requires for both CA and code-signing
+> certificates:
+>
+> > *Root and Intermediate CA Certificates* — "the `keyUsage` extension MUST be present and MUST
+> > be marked critical. Bit positions for `keyCertSign` MUST be set."
+> > *Leaf Certificates* — "the `keyUsage` extension MUST be present and MUST be marked critical.
+> > Bit positions for `digitalSignature` MUST be set."
+> > — https://github.com/notaryproject/specifications/blob/main/specs/signature-specification.md#certificate-requirements
+>
+> Affected certificates: **&lt;paste check-notary-profile.sh output&gt;**
+>
+> **Re-issuing from the current template won't fix this** — criticality is set by the issuing CA's
+> certificate template, not by Venafi. On ADCS that's *Certificate Template → Properties →
+> Extensions → Key Usage → Edit → "Make this extension critical"*.
+>
+> While the template is open, could you confirm the rest of the profile: `basicConstraints`
+> critical with `CA:TRUE` on the CA certificates; on the leaf `digitalSignature` only (no
+> `keyCertSign`, `cRLSign`, `keyEncipherment`); EKU containing at most `codeSigning` and **not**
+> `serverAuth`, `clientAuth`, `emailProtection`, `timeStamping` or `anyExtendedKeyUsage`; RSA
+> 2048/3072/4096 or EC 256/384/521; subject DN including `C`, `ST`, `O` and `OU`; and no SHA-1
+> signatures anywhere in the chain.
+>
+> **Timing:** nothing has been signed with these certificates yet, so re-issuing now costs
+> nothing. Once images are signed in production, changing a certificate means re-signing them —
+> and changing the *root* means re-signing everything and updating the admission controller's
+> trust anchor.
+
+</details>
 
 ---
 
-## Prerequisites
+## 2. Why the trust anchor matters
 
-### 0. Set your working variables
+An admission controller verifies a signature by checking that the chain terminates in a CA
+certificate given to it in advance — the **trust anchor**. Two consequences shape everything else.
 
-Run everything from this directory.
+**The anchor is an authorization boundary, not an identity check.** Our admission controller (Wiz)
+accepts one input: which CA certificate(s) to trust. It cannot additionally require *"and the
+signing certificate must be this one"* — the Notary spec calls that `trustedIdentities`, and Wiz
+doesn't implement it. So **anything chaining to the anchor is admitted, fleet-wide**. That's why
+the anchor must be a CA used for nothing but image signing, rather than a general-purpose
+corporate root. [§4.6](#44-two-leaves-one-root--what-the-anchor-cannot-distinguish) demonstrates
+this on your laptop.
+
+**Certificate expiry is the revocation mechanism.** We deliberately don't use trusted
+timestamping: without it, every certificate in the chain must be valid *now*, so a leaked key
+stops being useful when its certificate expires — a bound an attacker cannot extend. A timestamped
+signature survives expiry indefinitely. This gets "fixed" by well-meaning people; don't enable it.
+
+---
+
+## 3. Prerequisites
 
 ```bash
 export DEMO_DIR="$PWD"
@@ -70,74 +246,43 @@ case "$(uname -s)" in
   Darwin) export NOTATION_DIR="$HOME/Library/Application Support/notation" ;;
   *)      export NOTATION_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/notation" ;;
 esac
-echo "notation config dir: $NOTATION_DIR"
 ```
 
-### 1. Start a local registry
+**Registry, build, push, digest:**
 
 ```bash
-docker run -d --name venafi-demo-registry \
-  -p 5001:5000 \
-  -e REGISTRY_STORAGE_DELETE_ENABLED=true \
-  registry:3
+docker run -d --name venafi-demo-registry -p 5001:5000 \
+  -e REGISTRY_STORAGE_DELETE_ENABLED=true registry:3
 
-curl -fsS http://localhost:5001/v2/ && echo "registry up"
-```
-
-`registry:3` (distribution v3) implements the OCI 1.1 **Referrers API**, which is how a signature
-gets attached to and discovered for an image. On an older registry notation falls back to the
-referrers *tag* schema — it still works, but that's worth knowing if signatures seem to vanish.
-
-### 2. Build and push the image
-
-```bash
 docker build -t "$IMAGE" "$DEMO_DIR"
 docker push "$IMAGE"
-```
 
-### 3. Capture the digest
-
-```bash
 export IMAGE_DIGEST="$(docker inspect --format='{{index .RepoDigests 0}}' "$IMAGE")"
 echo "$IMAGE_DIGEST"
-# localhost:5001/venafi-demo@sha256:1a2b3c...
 ```
 
-Two rules, both load-bearing:
+`registry:3` implements the OCI 1.1 Referrers API, which is how signatures are attached and
+discovered. Older registries fall back to the referrers *tag* schema — still works, worth knowing
+if signatures seem to vanish.
 
-**Push before sign, always.** A signature is an OCI artifact whose *subject* is the image manifest
-in the registry. There's nothing to attach a signature to until the image exists remotely —
-`notation sign` resolves the reference over the network and writes there.
+- **Push before sign.** A signature is an OCI artifact whose subject is the image manifest *in the
+  registry*; there's nothing to attach to until the image exists remotely.
+- **Sign the digest, never the tag.** A tag can be repointed after review.
 
-**Sign the digest, never the tag.** A tag can be repointed after you've checked the image, so
-you'd be signing bytes nobody reviewed.
-
-### 4. Install the notation CLI
+**Notation CLI** — v1.3.2 is what the Venafi plugin is tested against:
 
 ```bash
-# macOS
-brew install notation
-
-# Linux (or macOS without brew) — confirm the asset name on the release page first
-NOTATION_VERSION=1.3.2
-curl -fsSL -o notation.tar.gz \
-  "https://github.com/notaryproject/notation/releases/download/v${NOTATION_VERSION}/notation_${NOTATION_VERSION}_linux_amd64.tar.gz"
-tar -xzf notation.tar.gz notation && sudo mv notation /usr/local/bin/
-
+brew install notation      # macOS
+# Linux: download notation_<version>_<os>_<arch>.tar.gz from
+# https://github.com/notaryproject/notation/releases
 notation version
 ```
 
-v1.3.2 is the version the Venafi plugin is tested against. Asset names follow
-`notation_<version>_<os>_<arch>.tar.gz`; check the
-[release page](https://github.com/notaryproject/notation/releases) if the download 404s.
-
-### 5. Allow the plain-HTTP local registry
-
-Notation refuses non-TLS registries unless you allowlist them. Real registries need none of this.
+**Allow the plain-HTTP local registry** (real registries need none of this):
 
 ```bash
 mkdir -p "$NOTATION_DIR"
-# WARNING: overwrites config.json. Back it up first if you already use notation.
+# WARNING: overwrites config.json — back it up if you already use notation.
 cat > "$NOTATION_DIR/config.json" <<JSON
 {
     "insecureRegistries": ["localhost:5001"]
@@ -147,107 +292,55 @@ JSON
 
 ---
 
-## Option 1 — self-signed CA
+## 4. Option 1 — self-signed CA
 
-Keys on disk. No external services.
+Keys on disk, no external services. Useful as a **known-good reference** for §1 and to see the
+trust-anchor problem first-hand.
 
-### 1.1 Generate the PKI
+### 4.1 Generate the PKI
 
 ```bash
 ./gen-signing-certs.sh
 export PKI="$DEMO_DIR/pki"
-ls "$PKI"
-```
-
-Three tiers:
-
-```
-root CA (10y)  ->  intermediate CA (5y)  ->  signing leaf (365d)
+./check-notary-profile.sh "$PKI/signing-chain.crt"     # every rule in §1 passes
 ```
 
 | File | What it is |
 |---|---|
-| `root.crt` | **the trust anchor** — the certificate a verifier is given |
-| `intermediate.crt` | issuing CA, travels in the chain |
-| `signing.crt` / `signing.key` | the leaf and **its private key, sitting on your filesystem** |
-| `signing-chain.crt` | leaf + intermediate + root concatenated — **this is what you sign with** |
+| `root.crt` | the **trust anchor** — what a verifier is given |
+| `intermediate.crt` | issuing CA; travels in the chain |
+| `signing.crt` / `signing.key` | the leaf and **its private key, on your filesystem** |
+| `signing-chain.crt` | leaf + intermediate + root — **sign with this** |
 
-Read the `CHAIN LIFETIMES` block it prints. The number that matters is the **effective** lifetime
-— the earliest expiry anywhere in the chain, not the leaf's. Issuing a 365-day leaf from an
-intermediate with 200 days left gives you signatures that die in 200 days while the certificate
-still reads a year. The script refuses to do that silently; `--help` explains the clamp.
+The script prints `CHAIN LIFETIMES`. The number that matters is the **effective** lifetime: the
+earliest expiry in the chain, not the leaf's.
 
-Now inspect the leaf profile, because this is exactly what you'd ask a PKI team to reproduce:
+### 4.2 Register the key
 
-```bash
-openssl x509 -in "$PKI/signing.crt" -noout -text \
-  | grep -A2 "Basic Constraints\|Key Usage\|Extended Key Usage"
-openssl x509 -in "$PKI/signing.crt" -noout -subject
-```
-
-You should see:
-
-```
-X509v3 Basic Constraints: critical
-    CA:FALSE
-X509v3 Key Usage: critical
-    Digital Signature
-X509v3 Extended Key Usage:
-    Code Signing
-
-subject=C = US, ST = WA, O = ExampleOrg, OU = Platform-Unikube, CN = unikube-image-signer
-```
-
-`CA:FALSE`, `Digital Signature` only, `Code Signing` — and crucially **no** `TLS Web Server
-Authentication`. That last point is why an ordinary web-server certificate template can't be
-reused for image signing: `serverAuth` in the EKU fails the Notary leaf profile.
-
-The full DN matters too. A leaf carrying only `CN` and `O` can't be pinned by a valid
-`trustedIdentities` policy later — see [1.5](#15-verify).
-
-### 1.2 Register the key with notation
-
-`notation key add` handles **plugin** keys only — the CLI has no subcommand for on-disk key/cert
-pairs. You register those by writing `signingkeys.json` directly, and it takes **absolute paths**:
+`notation key add` handles **plugin** keys only; on-disk key/cert pairs are registered by writing
+`signingkeys.json` directly, with **absolute paths**:
 
 ```bash
 cat > "$NOTATION_DIR/signingkeys.json" <<JSON
 {
     "default": "local-signer",
     "keys": [
-        {
-            "name": "local-signer",
-            "keyPath": "${PKI}/signing.key",
-            "certPath": "${PKI}/signing-chain.crt"
-        }
+        { "name": "local-signer", "keyPath": "${PKI}/signing.key", "certPath": "${PKI}/signing-chain.crt" }
     ]
 }
 JSON
-
 notation key ls
 ```
 
-**`certPath` must be `signing-chain.crt`, not `signing.crt`.** The Notary spec requires the
-envelope to carry the complete chain terminating at the root. A bare leaf signs without complaint
-and then fails verification — a green build and a rejected pod.
+**`certPath` must be the chain, not `signing.crt`.** A bare leaf signs without complaint and then
+fails verification.
 
-### 1.3 Sign
+### 4.3 Sign, inspect, verify
 
 ```bash
 notation sign --signature-format cose --key local-signer "$IMAGE_DIGEST"
-notation ls "$IMAGE_DIGEST"
+notation inspect "$IMAGE_DIGEST"      # 'certificates' should list THREE entries
 ```
-
-### 1.4 Inspect the signature
-
-```bash
-notation inspect "$IMAGE_DIGEST"
-```
-
-Look at the `certificates` list — **three** entries: leaf, intermediate, root. Remember what this
-looks like; in Option 2 it becomes the test that matters most.
-
-### 1.5 Verify
 
 ```bash
 notation certificate add --type ca --store demo-local "$PKI/root.crt"
@@ -255,15 +348,13 @@ notation certificate add --type ca --store demo-local "$PKI/root.crt"
 cat > "$DEMO_DIR/trustpolicy.json" <<'JSON'
 {
     "version": "1.0",
-    "trustPolicies": [
-        {
-            "name": "demo-local",
-            "registryScopes": [ "*" ],
-            "signatureVerification": { "level": "strict" },
-            "trustStores": [ "ca:demo-local" ],
-            "trustedIdentities": [ "*" ]
-        }
-    ]
+    "trustPolicies": [{
+        "name": "demo-local",
+        "registryScopes": [ "*" ],
+        "signatureVerification": { "level": "strict" },
+        "trustStores": [ "ca:demo-local" ],
+        "trustedIdentities": [ "*" ]
+    }]
 }
 JSON
 
@@ -271,81 +362,38 @@ notation policy import --force "$DEMO_DIR/trustpolicy.json"
 notation verify "$IMAGE_DIGEST"
 ```
 
-Verify against the **root**, not the intermediate — the root is what a verifier holds.
+Verify against the **root**, not the intermediate. Note `trustedIdentities: ["*"]` — per the spec
+that means *any* certificate issued by a CA in the trust store. **It is the only mode Wiz can
+express.**
 
-Note `trustedIdentities: ["*"]`. Per the Notary spec that means *"any signing certificate issued
-by a CA in the trust store is allowed"*. **This is the only mode Wiz can express.** Sections 1.6
-and 1.7 show why that matters.
+### 4.4 Two leaves, one root — what the anchor cannot distinguish
 
-### 1.6 A second image, signed by a second leaf
-
-Mint a signing certificate for a *different team*, from the same intermediate:
+Issue a signing certificate for a *different team* from the same intermediate, and sign a second
+image with it:
 
 ```bash
 ./gen-signing-certs.sh --second-leaf
 openssl x509 -in "$PKI/signing-team-b.crt" -noout -subject
-# subject=C = US, ST = WA, O = ExampleOrg, OU = Other-Team, CN = other-team-signer
-```
+# ... OU = Other-Team, CN = other-team-signer
 
-Nothing here is a misconfiguration — issuing certificates to multiple teams is what a shared CA is
-*for*. Confirm both leaves are legitimately issued under the same root:
-
-```bash
-openssl verify -CAfile "$PKI/root.crt" -untrusted "$PKI/intermediate.crt" \
-  "$PKI/signing.crt" "$PKI/signing-team-b.crt"
-# signing.crt: OK
-# signing-team-b.crt: OK
-```
-
-Build and push a second, genuinely different image:
-
-```bash
 docker build --build-arg VARIANT=b -t "${REGISTRY}/venafi-demo:v2" "$DEMO_DIR"
 docker push "${REGISTRY}/venafi-demo:v2"
 export IMAGE_B_DIGEST="$(docker inspect --format='{{index .RepoDigests 0}}' "${REGISTRY}/venafi-demo:v2")"
-echo "$IMAGE_B_DIGEST"
 ```
 
-Register the second key alongside the first — note `signingkeys.json` holds a **list**:
-
-```bash
-cat > "$NOTATION_DIR/signingkeys.json" <<JSON
-{
-    "default": "local-signer",
-    "keys": [
-        {
-            "name": "local-signer",
-            "keyPath": "${PKI}/signing.key",
-            "certPath": "${PKI}/signing-chain.crt"
-        },
-        {
-            "name": "team-b-signer",
-            "keyPath": "${PKI}/signing-team-b.key",
-            "certPath": "${PKI}/signing-team-b-chain.crt"
-        }
-    ]
-}
-JSON
-
-notation key ls
-```
-
-Sign the second image with the second leaf, and verify both:
+Add it to `signingkeys.json` as a second entry named `team-b-signer` (the `keys` array takes
+several), then:
 
 ```bash
 notation sign --signature-format cose --key team-b-signer "$IMAGE_B_DIGEST"
-
-notation verify "$IMAGE_DIGEST"      # signed by Platform-Unikube
-notation verify "$IMAGE_B_DIGEST"    # signed by Other-Team
+notation verify "$IMAGE_DIGEST"      # PASSES
+notation verify "$IMAGE_B_DIGEST"    # ALSO PASSES
 ```
 
-**Both pass.** You now have two signed images, signed by two different teams' certificates, and
-the verifier accepts both — because the only question it was asked is *"does this chain terminate
-in root.crt?"*, and for both of them it does.
+Nothing here is a misconfiguration — issuing to multiple teams is what a shared CA is *for*. But
+**both images are accepted**, because the only question asked was "does this chain to `root.crt`?"
 
-### 1.7 Now pin the signer — and see what Wiz can't do
-
-Edit `trustpolicy.json` and replace `"trustedIdentities": [ "*" ]` with:
+Now pin the signer. Replace `"trustedIdentities": [ "*" ]` with:
 
 ```json
 "trustedIdentities": [ "x509.subject: C=US, ST=WA, O=ExampleOrg, OU=Platform-Unikube" ]
@@ -353,199 +401,132 @@ Edit `trustpolicy.json` and replace `"trustedIdentities": [ "*" ]` with:
 
 ```bash
 notation policy import --force "$DEMO_DIR/trustpolicy.json"
-
-notation verify "$IMAGE_DIGEST"      # PASSES — OU matches
-notation verify "$IMAGE_B_DIGEST"    # FAILS  — signing certificate not in trusted identities
+notation verify "$IMAGE_DIGEST"      # PASSES
+notation verify "$IMAGE_B_DIGEST"    # FAILS — signing certificate not in trusted identities
 ```
 
-That second failure is the control we want, and **Wiz does not implement it.** Its image-integrity
-validator takes a certificate and nothing else — there is no `trustedIdentities` equivalent, so it
-is permanently in the `"*"` mode of 1.6, where both images are admitted.
+That second failure is the control we want, and **Wiz cannot express it** — it is permanently in
+`"*"` mode, where both images are admitted. Hence: the trust anchor must be a CA used for nothing
+else. Pin at `OU`, not `CN`, since the annual leaf rotation changes the CN.
 
-This is the whole reason the trust anchor has to be a CA used for *nothing but* image signing. Put
-a general-purpose corporate root in there and every team holding a code-signing certificate from
-it becomes able to get images admitted fleet-wide — the situation you just reproduced in 1.6, at
-company scale.
+### 4.5 What this proves
 
-Two details worth noting while you're here:
+**The anchor is the boundary** — anything chaining to `root.crt` is admitted, and the narrowing
+control doesn't exist in Wiz.
 
-- Pin at **`OU`, not `CN`**. The annual leaf rotation changes the CN; pinning there would mean a
-  policy change every year. Partial DNs match, so `OU` is the stable handle.
-- The entry must contain at least `C`, `ST` (or `S`) and `O`. A leaf issued with only `CN` and `O`
-  **cannot be pinned by a valid policy at all** — which is why `gen-signing-certs.sh` issues a
-  full DN even though Wiz ignores it today.
-
-### 1.8 What you just proved, and the problem with it
-
-Two things.
-
-**The anchor is the boundary.** Anything chaining to `root.crt` is admitted, and the only way to
-narrow that is a field Wiz doesn't have. So the anchor must be dedicated.
-
-**The key is a liability.** `signing.key` and `signing-team-b.key` are sitting in `./pki/`,
-readable by you, and in CI they'd be secrets pasted into environment variables. Anyone who obtains
-one can sign anything the admission controller will accept, fleet-wide, for up to 365 days, with
-no audit trail and no way to revoke.
-
-Option 2 fixes the second problem. **It does not fix the first** — only a dedicated root does
-that.
+**The key is a liability** — `signing.key` sits in `./pki/`, and in CI it would be a secret in an
+environment variable. Whoever holds it can sign anything, for up to a year, with no audit trail.
+Option 2 fixes this second problem; only a dedicated root fixes the first.
 
 ---
 
-## Option 2 — Venafi CodeSign Protect
+## 5. Option 2 — Venafi CodeSign Protect
 
-Same image, same `notation sign` command. The difference is that **no private key ever exists on
-this machine** — signing becomes an API call to Venafi, which signs inside its HSM.
+Same `notation sign` command. The difference: **no private key exists on this machine** — signing
+is an API call to Venafi, which signs inside its HSM.
 
-### 2.1 What you have, and what's still missing
+### 5.1 What must exist on the Venafi side
 
-What the PKI team has provided:
-
-| Given | Value | Maps to |
+| # | Thing | Who |
 |---|---|---|
-| Code signing project + certificate | `TeamImageSigning` | `tpp_project` and the key label — **but see below** |
-| Credentials | username + password | must be **exchanged for an access token** — see [2.3](#23-exchange-your-password-for-an-access-token) |
-| API host | `codesigningapi.test.org` | `tpp_url` |
-| Tooling hint | "use `pkcs11config`" | the CodeSign Protect client — see [2.2](#22-install-the-client-tools) |
-| Environment | **staging** | not production; see [2.11](#211-staging-is-not-production) |
+| 1 | A **dedicated code-signing hierarchy** — its own root, not the corporate root ([§2](#2-why-the-trust-anchor-matters)) | PKI |
+| 2 | A **certificate template** matching the profile in [§1](#1-certificate-requirements) | PKI |
+| 3 | A **CA template** in Venafi pointing at (2) — every environment needs one | Code Signing Admin |
+| 4 | An **Environment Template** — you can't create a project without access to one | Code Signing Admin |
+| 5 | A **Project + Environment** — type *single*, key generated in the HSM, TPP-managed lifecycle | you request, admin approves |
+| 6 | A **Flow with no approval action** — otherwise signing blocks waiting for a human | Code Signing Admin |
+| 7 | The **`vsign-sdk` API Integration** with your user assigned, scope `codesignclient;codesign;certificate:manage,discover` | TPP admin |
+| 8 | **Timestamping left off** ([§2](#2-why-the-trust-anchor-matters)) | Code Signing Admin |
 
-**Four things are still missing, and three of them block signing.**
+Venafi is a control plane, not a CA — it connects to one (Microsoft CA/ADCS, EJBCA, Entrust,
+DigiCert, Sectigo, or self-signed). Items 1–2 happen on that CA, possibly with a different team.
 
-| # | Missing | Why it blocks | Ask |
-|---|---|---|---|
-| 1 | The **`vsign-sdk` API Integration**, with your user assigned to it | No API Integration means no token, whatever your password is. Minimum scopes for TPP ≥ 23.x are `codesignclient;codesign`; vSign also wants `certificate:manage,discover` to retrieve signing certificates. | "Please create the `vsign-sdk` API Integration and assign our code signing user to it, with scope `codesignclient;codesign;certificate:manage,discover`." |
-| 2 | The exact **`Project\Environment`** path | `TeamImageSigning` is one name, but `tpp_project` needs *two* — the config value is literally `Project\Environment`. It's unclear whether that's the project, the environment, or the certificate label. | "What is the full `Project\Environment` path, and what is the certificate label on the environment?" |
-| 3 | The **root CA certificate** (and chain) | This is what the admission controller is given. Without it nothing can be verified — and nobody mentioned handing it over. | "Please send the root CA certificate for the hierarchy that issued this signing certificate." |
-| 4 | **Which CA issued it** — dedicated hierarchy, or the corporate root? | Doesn't block signing. Decides whether this design is sound at all — see [1.7](#17-now-pin-the-signer--and-see-what-wiz-cant-do). | You can answer this yourself in [2.4](#24-find-the-environment-path-and-inspect-the-certificate). |
+### 5.2 Client tools and an access token
 
-Item 4 is the one to care about. Sections 1.6–1.7 exist to explain why: if `TeamImageSigning` was
-issued under a general-purpose corporate root, then every other code-signing certificate in the
-company is also a fleet-wide admission credential, and no amount of Venafi configuration fixes it.
+`pkcs11config` ships with the **CodeSign Protect client**, a separate download from the Venafi
+server. Note it belongs to the PKCS#11 path — the notation plugin uses the REST API via the vSign
+SDK, so you need `pkcs11config` only to *discover* certificate labels.
 
-The remaining prerequisites from the original design — Flow with no approval action, timestamping
-off, leaf profile, key type, validity, IP restrictions — are all checkable once you can
-authenticate. [2.10](#210-the-checklist-you-can-now-run-yourself) turns them into commands.
-
-### 2.2 Install the client tools
-
-`pkcs11config` ships with the **CodeSign Protect client**, which is a separate download from the
-Venafi server — not part of notation. Ask for the Linux/macOS client package, or fetch it from the
-TPP web UI.
-
-> **Worth clarifying with them:** `pkcs11config` belongs to the **PKCS#11** driver path. The
-> notation plugin does *not* use PKCS#11 — it talks to the REST API through the vSign SDK. So you
-> need `pkcs11config` only to *discover* the certificate label. If they intended PKCS#11-based
-> signing, that's a different integration than this one, worth resolving before you build anything.
-
-You'll also want the `vsign` CLI, which is the easiest way to turn a password into a token:
-
-```bash
-go install github.com/venafi/vsign/cmd/vsign@latest
-# or clone and `make vsign`
-```
-
-### 2.3 Exchange your password for an access token
-
-The plugin's `config.ini` takes an `access_token`, not a username and password. Two ways to get
-one.
-
-**With the vsign CLI:**
+The plugin needs an `access_token`, not a username and password:
 
 ```bash
 export TPP_URL='https://codesigningapi.test.org'
 
+# with the vsign CLI (go install github.com/venafi/vsign/cmd/vsign@latest)
 vsign getcred --url "$TPP_URL" --username 'your-user' --password 'your-password'
-# access_token: P1sfL7l4uCWwH/zMkJY7IA==
 
-export TPP_ACCESS_TOKEN='P1sfL7l4uCWwH/zMkJY7IA=='
-```
-
-**Or straight against the API:**
-
-```bash
+# or directly
 curl -sS -X POST "${TPP_URL}/vedauth/authorize/oauth" \
   -H 'Content-Type: application/json' \
-  -d '{
-        "client_id": "vsign-sdk",
-        "username":  "your-user",
-        "password":  "your-password",
-        "scope":     "codesignclient;codesign;certificate:manage,discover"
-      }'
+  -d '{"client_id":"vsign-sdk","username":"your-user","password":"your-password",
+       "scope":"codesignclient;codesign;certificate:manage,discover"}'
+
+export TPP_ACCESS_TOKEN='...'
 ```
 
-You get back `access_token`, `refresh_token`, `expires` and the granted `scope`. Check the scope
-in the response actually contains what you asked for — a narrower grant is how missing-permission
-errors show up three steps later.
+Common failures: `vsign-sdk` doesn't exist or your user isn't assigned to it (item 7); local TPP
+identities often need a `local:` prefix on the username; and the internal TLS certificate of
+`codesigningapi.test.org` may not be trusted — vSign takes a `trust_bundle` option for that (a
+*different* certificate from the code-signing chain).
 
-Three things that commonly go wrong here:
+For CI later, use `jwt`/`VSIGN_JWT` to exchange a short-lived OIDC token rather than storing a
+long-lived one.
 
-- **`client_id` must match a real API Integration.** If `vsign-sdk` doesn't exist, or your user
-  isn't assigned to it, you get an error rather than a token. That's missing item 1.
-- **Username format.** Local TPP identities are often `local:your-user`; AD identities are the
-  bare name or `domain\user`. If authentication fails with credentials you know are right, this is
-  usually why.
-- **TLS trust.** `codesigningapi.test.org` is an internal staging host, so its TLS certificate is
-  probably issued by an internal CA your laptop doesn't trust yet. vSign takes a
-  `trust_bundle` config option (`VSIGN_TRUST_BUNDLE`) pointing at that chain — not to be confused
-  with the code-signing chain from missing item 3. They're different certificates for different
-  purposes.
-
-**Tokens expire.** For CI later, don't store a long-lived one: vSign supports `jwt`/`VSIGN_JWT`,
-which exchanges a short-lived OIDC token for a short-lived TPP access token — exactly what you'd
-want from GitHub Actions OIDC. Worth confirming JWT authentication is enabled on this server
-(it needs TPP 22.4+).
-
-### 2.4 Find the environment path and inspect the certificate
+### 5.3 Retrieve the certificates and check them
 
 ```bash
-pkcs11config getcertificate --help      # flags vary by client version
+pkcs11config listobjects
 ```
 
-Use it to list what your user can reach and read back the certificate label. You need two values:
-the full `Project\Environment` path, and the label. If they differ from `TeamImageSigning`, that
-resolves missing item 2.
+For this environment that returns three labels — one per tier, each with a different job:
 
-**Then answer missing item 4.** Save the certificate and read its issuer chain:
-
-```bash
-openssl x509 -in TeamImageSigning.crt -noout -issuer -subject -dates
-openssl x509 -in TeamImageSigning.crt -noout -text \
-  | grep -A2 "Basic Constraints\|Key Usage\|Extended Key Usage"
-```
-
-Compare against the profile you produced in [1.1](#11-generate-the-pki):
-
-| Check | Want | If not |
+| Label | Tier | Used for |
 |---|---|---|
-| `Extended Key Usage` | `Code Signing` **only** | `serverAuth` present → TLS template was used, verification will fail |
-| `Key Usage` | `Digital Signature` | `keyCertSign` present → wrong profile |
-| `Basic Constraints` | `CA:FALSE` | a CA certificate cannot be a signing certificate |
-| Subject DN | `C`, `ST`, `O`, `OU` all present | can't be pinned by a valid policy later |
-| `notAfter` | ~365 days | much shorter means re-signing everything that often |
-| **Issuer chain** | a root used **only** for code signing | the corporate root → see [1.7](#17-now-pin-the-signer--and-see-what-wiz-cant-do); escalate |
+| `Team-Image-Signing` | leaf | signing → `CERT_LABEL` |
+| `Team-Image-Signing-Intermediate-1` | intermediate | travels inside the signature |
+| `Team-Image-Signing-Root` | root | verification → trust store, and the admission controller |
 
-### 2.5 Install the plugin
+**Never put the intermediate in a trust store.** The Notary spec warns this is certificate pinning
+that "can break signature verification unexpectedly anytime the intermediate certificate is
+rotated" — and the `-1` suffix says an `Intermediate-2` is already planned.
+
+```bash
+pkcs11config getcertificate -label Team-Image-Signing -file leaf.crt -chain leaf.chain
+pkcs11config getcertificate -label Team-Image-Signing-Root -file team-image-signing-root.crt
+
+./check-notary-profile.sh leaf.chain          # <-- §1. Do not proceed until this passes.
+```
+
+Also confirm the root is genuinely dedicated and self-signed:
+
+```bash
+openssl x509 -in team-image-signing-root.crt -noout -subject -issuer
+# subject and issuer identical => self-signed => it is a root
+```
+
+A root named `Team-Image-Signing-Root` reads as purpose-built rather than the corporate root,
+which is what [§2](#2-why-the-trust-anchor-matters) requires. If it turns out to be the
+company-wide root, escalate — that's the [§4.6](#44-two-leaves-one-root--what-the-anchor-cannot-distinguish)
+scenario at company scale.
+
+### 5.4 Configure and sign
+
+Three names, three spellings, none interchangeable:
+
+| | Value |
+|---|---|
+| Project | `Team Image Signing` |
+| Environment | `TeamImageSigning` |
+| → `tpp_project` | `Team Image Signing\TeamImageSigning` |
+| Certificate label → `CERT_LABEL` | `Team-Image-Signing` |
 
 ```bash
 notation plugin install \
   --url https://github.com/Venafi/notation-venafi-csp/releases/download/v0.3.0/notation-venafi-csp-linux-amd64.tar.gz \
   --sha256sum 03771794643f18c286b6db3a25a4d0b8e7c401e685b1e95a19f03c9356344f5a
 
-notation plugin ls
-```
-
-That hash is for **linux-amd64 v0.3.0** — the only one published in the vendor README. For macOS
-(`-darwin-arm64`, `-darwin-amd64`) take the hash from the
-[release page](https://github.com/Venafi/notation-venafi-csp/releases).
-
-> In CI, don't pull this from GitHub on every build. Mirror the binary internally and pin the
-> hash — it's a new dependency inside the signing path.
-
-### 2.6 Write config.ini
-
-```bash
-export TPP_PROJECT='TeamImageSigning\<environment>'   # confirm in 2.4
-export CERT_LABEL='TeamImageSigning'                  # confirm in 2.4
+export TPP_PROJECT='Team Image Signing\TeamImageSigning'   # single quotes: backslash + spaces
+export CERT_LABEL='Team-Image-Signing'
 
 umask 077
 cat > "$DEMO_DIR/config.ini" <<INI
@@ -554,127 +535,63 @@ access_token = ${TPP_ACCESS_TOKEN}
 tpp_project = ${TPP_PROJECT}
 INI
 chmod 600 "$DEMO_DIR/config.ini"
-```
+grep tpp_project "$DEMO_DIR/config.ini"    # confirm the backslash and spaces survived
 
-**`tpp_url` is the base URL** — `https://codesigningapi.test.org`, with no path suffix. The SDK
-appends `/vedauth` and `/vedsdk` itself.
-
-If TLS to that host fails, add the internal CA chain:
-
-```ini
-trust_bundle = /path/to/internal-ca-chain.pem
-```
-
-This file carries a bearer token — treat it like a private key. In CI it belongs in a `mktemp -d`
-with a `trap` cleanup.
-
-### 2.7 Register the remote key
-
-```bash
-notation key add --default "$CERT_LABEL" \
-  --plugin venafi-csp \
-  --id "$CERT_LABEL" \
+notation key add --default "$CERT_LABEL" --plugin venafi-csp --id "$CERT_LABEL" \
   --plugin-config "config=$DEMO_DIR/config.ini"
 
-notation key ls
-```
-
-Compare with [1.2](#12-register-the-key-with-notation): no `keyPath`, no `certPath`, no
-`signingkeys.json`. There is nothing on disk to point at.
-
-### 2.8 Sign
-
-```bash
 notation sign --signature-format cose --key "$CERT_LABEL" "$IMAGE_DIGEST"
-notation ls "$IMAGE_DIGEST"
 ```
 
-Identical to Option 1's command. If it fails, in rough order of likelihood:
+`tpp_url` is the **base** URL — no path suffix; the SDK appends `/vedauth` and `/vedsdk`. That
+sha256 is for **linux-amd64 v0.3.0** only; take others from the
+[release page](https://github.com/Venafi/notation-venafi-csp/releases). In CI, mirror the plugin
+binary internally rather than pulling from GitHub on every build.
 
-| Symptom | Cause |
-|---|---|
-| hangs, or "pending approval" | the Environment's Flow has an approval action — no-approval Flow needed for CI |
-| 401 / unauthorized | token expired, or scope too narrow — recheck the granted scope from 2.3 |
-| "signing key not found" | `tpp_project` path or `CERT_LABEL` wrong — back to 2.4 |
-| x509 / TLS error | internal CA not trusted — set `trust_bundle` |
-| forbidden from this address | your IP is outside the Environment's permitted range |
-| refuses the registry | `localhost:5001` not allowlisted — redo prerequisite 5 |
+Compare with [§4.2](#42-register-the-key): no `keyPath`, no `certPath`, nothing on disk to point at.
 
-### 2.9 Inspect — the test that matters
+### 5.5 Inspect and verify
 
 ```bash
 notation inspect "$IMAGE_DIGEST"
 ```
 
-Count the `certificates` entries. In Option 1 you controlled the chain file directly, so three was
-guaranteed. Here the chain comes from whatever the CodeSign Protect environment holds, and **the
-vendor docs don't state whether that's the full chain or a bare leaf**.
+**Count the `certificates` entries.** In Option 1 you controlled the chain file, so three was
+guaranteed. Here the chain comes from whatever the CodeSign Protect environment holds, and the
+vendor docs don't state whether that's the full chain or a bare leaf. **One entry = bare leaf =
+stop** — signing succeeded, the admission controller will reject the image, and you'd find out on
+a cluster. It's fixable environment configuration, not a dead end.
 
-**One entry = bare leaf = stop.** Signing succeeded, the admission controller will reject the
-image, and you'd only find out on a cluster. Fix the environment before wiring any pipeline.
+```bash
+notation certificate add --type ca --store team-image-signing "$DEMO_DIR/team-image-signing-root.crt"
+# reuse trustpolicy.json from §4.3 with trustStores: [ "ca:team-image-signing" ]
+notation policy import --force "$DEMO_DIR/trustpolicy.json"
+notation verify "$IMAGE_DIGEST"
+```
 
-### 2.10 The checklist you can now run yourself
+### 5.6 Troubleshooting
 
-Once 2.3 works, these stop being questions for the PKI team and become commands:
-
-| Question | How to answer it |
+| Symptom | Cause |
 |---|---|
-| Dedicated hierarchy or corporate root? | `openssl x509 -noout -issuer` on the cert, then walk the chain (2.4) |
-| Right leaf profile? | `openssl x509 -noout -text` (2.4) |
-| Key type supported by the plugin? | RSA 2048/3072/4096 or EC 256/384/521 — **not** Ed25519, **not** RSA-8192 |
-| Certificate validity? | `openssl x509 -noout -dates` |
-| Full chain or bare leaf? | `notation inspect` (2.9) |
-| Does the Flow block automation? | 2.8 either returns or hangs |
-| Is my IP allowed? | 2.8 returns a forbidden error if not |
-| Is timestamping off? | `notation inspect` — a timestamped signature shows a timestamp attribute |
+| `key usage extension must be marked critical` | certificate profile — **[§1.4](#14-if-the-certificates-fail)** |
+| hangs, or "pending approval" | the Flow has an approval action — item 6 |
+| 401 / unauthorized | token expired, or scope too narrow |
+| "signing key not found" | `tpp_project` or `CERT_LABEL` wrong — check the quoting in §5.4 |
+| x509 / TLS error | internal CA not trusted — set `trust_bundle` |
+| forbidden from this address | your IP is outside the Environment's permitted range |
+| registry refused | `localhost:5001` not allowlisted — §3 |
 
-### 2.11 Staging is not production
+### 5.7 Staging is not production
 
-You have a **staging** environment, which is the right place to start — but two consequences:
-
-- The staging root is **not** the production trust anchor. Don't put it anywhere near the
-  production admission controller: it would make every staging-signed image admissible in prod.
-- Everything in 2.1 has to happen again for production, on a *different* hierarchy. Get the
-  answers to items 1–4 now, while it's cheap, so the production request is a known quantity rather
-  than a rediscovery.
-
-Worth asking now: **will the production hierarchy be structured the same way as staging?** If
-staging was quietly issued under the corporate root because it's "only staging", production may
-default to the same thing.
-
-### 2.12 The two-signer problem, restated for Venafi
-
-Section 1.6 has a direct equivalent here, and it's the thing to keep in mind when the PKI team
-offers to reuse an existing hierarchy: **a second CodeSign Protect Environment, under the same CA,
-produces a second leaf that chains to the same root.** Everything about it is legitimate, and the
-admission controller will admit its signatures exactly as it admits yours.
-
-Venafi *can* constrain who signs — key custody in the HSM, the Flow, per-environment IP
-restrictions, the permitted-applications list. But every one of those is enforced at **signing
-time by Venafi**, on our signing path. The admission controller enforces one thing at **admission
-time**: does the chain terminate in the anchor. A control on the wrong side of that line cannot
-narrow what gets admitted.
-
-Which is why the dedicated hierarchy — missing item 4 in [2.1](#21-what-you-have-and-whats-still-missing)
-— is not optional detail. It is the only part of this design that constrains anyone other than us.
+The staging root is **not** the production trust anchor — keep it away from the production
+admission controller. Everything in §5.1 recurs for production on a different hierarchy, so
+resolve §1 now while it's cheap. Ask explicitly whether production will be structured the same
+way: if staging was quietly issued under the corporate root because it's "only staging",
+production may default to the same.
 
 ---
 
-## What changed between the two options
-
-| | Option 1 — self-signed | Option 2 — Venafi |
-|---|---|---|
-| Private key location | your filesystem / a CI secret | HSM, non-exportable |
-| Key registration | hand-written `signingkeys.json` | `notation key add --plugin` |
-| Credential on the machine | the key itself | a scoped, revocable token |
-| Who can sign | anyone who reads the file | the identity the Flow permits, from a permitted IP |
-| Audit | none | every signing operation recorded |
-| Rotation | regenerate, paste a new secret | certificate renewal in TPP, no secret to update |
-| `notation sign` command | **identical** | **identical** |
-
-That last row is why the migration is small: everything changes *behind* the sign call.
-
-## Cleanup
+## 6. Cleanup
 
 ```bash
 docker rm -f venafi-demo-registry
@@ -684,17 +601,9 @@ notation certificate delete --type ca --store demo-local --all -y 2>/dev/null
 rm -rf "$DEMO_DIR/pki" "$DEMO_DIR/config.ini" "$DEMO_DIR/trustpolicy.json"
 ```
 
-`./pki/` holds private keys in the clear and is gitignored. Don't commit it, and don't reuse those
-certificates for anything real.
+`./pki/` holds private keys in the clear and is gitignored. Don't reuse those certificates for
+anything real.
 
-## Not covered here
-
-**Whether the image should be signed at all.** In the real pipeline an image must pass a
-vulnerability/compliance check before it's signed — signing is the *reward* for compliance, not a
-step everything gets. The `Dockerfile` here is `FROM alpine`; it exists only to have something
-with a digest.
-
-**What the admission controller actually concludes.** `notation verify` proves what *Notation*
-concludes. Wiz's own trust policy isn't ours to inspect, and `trustedIdentities` has no Wiz
-equivalent. A local pass means the chain and the expiry are sound — most of what goes wrong, but
-not all of it.
+**Not covered here:** whether an image *should* be signed — in the real pipeline a compliance
+check gates signing, and the `Dockerfile` here is `FROM alpine` purely to have a digest. And
+`notation verify` proves what *Notation* concludes; Wiz's own trust policy isn't ours to inspect.
