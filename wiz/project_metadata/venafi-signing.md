@@ -106,8 +106,9 @@ Wiz gap we'll grow out of, it's the only mechanism either engine offers. I've re
 **② Root rotation may not be a hard cutover after all.** [VERIFIED — your finding]
 
 You pointed out `notary_v2` is a **list**, which the repo confirms —
-[`bootstrap/main.tf`](../container-vulnerability-exemption.tf/terraform/bootstrap/main.tf) already
-writes `notary_v2 = [{ certificate = ... }]` as a single-element list. So:
+[`main.tf`](../container-vulnerability-exemption.tf/terraform/main.tf) writes
+`notary_v2 = [ for certificate in sort(distinct(var.notary_ca_certificates)) : {...} ]`,
+one element per `trust/*.crt`. So:
 
 ```hcl
 notary_v2 = [
@@ -434,9 +435,9 @@ has no identity field either. It buys CI-side checking and optionality if **Wiz*
 
 ### 6.4 What moves in this repo
 
-> **A (Bob, 2026-08-11):** *"Ok noted."* — unchanged from round 1, not repeated. Summary: one file
-> (`trust/ca.crt`) plus one bootstrap apply; `sign-image.sh` gains the plugin path; workflow
-> secrets change; zero cluster re-applies.
+> **A (Bob, 2026-08-11):** *"Ok noted."* — unchanged from round 1, not repeated. Summary: one
+> file in `trust/` plus one apply per tenant; `sign-image.sh` gains the plugin path; workflow
+> secrets change; no trust-policy changes (the validator id is stable).
 
 ### 6.5 The expiry cliff — an operational cost not previously stated
 
@@ -626,8 +627,8 @@ You wrote *"On Wiz I configure CA."* Right idea, two precisions:
 
 - It's the **root certificate only** — not the leaf, not the full chain. The chain travels inside
   the signature; Wiz holds the anchor.
-- It isn't configured in the Wiz console. It's `trust/ca.crt` → `render_bootstrap.py` →
-  **bootstrap terraform apply**. One file, one apply, zero cluster re-applies.
+- It isn't configured in the Wiz console. It's `trust/ca.crt` → `render.py` → **terraform
+  apply** (one per Wiz tenant). One file, one apply, no trust-policy changes.
 
 ### 10.5 Missing — three things that will bite
 
@@ -654,7 +655,7 @@ You wrote *"On Wiz I configure CA."* Right idea, two precisions:
 | 7 | **Users & Approvers** + **Flow** (no approval action) + IP restrictions | Owner / CSA | 8 |
 | 8 | Receive `TPP_PROJECT`, `CERT_LABEL`, CI service identity + token | PKI → you | 9 |
 | 9 | Wire `sign-image.sh` to the plugin; add `notation verify` in CI | you | 10 |
-| 10 | Root PEM → `trust/ca.crt` → bootstrap apply | you | — |
+| 10 | Root PEM → `trust/ca.crt` → terraform apply (per tenant) | you | — |
 | 11 | Test in a **`BLOCK`** cluster, not dev (correction ③) | you | — |
 
 Steps 1–7 are all PKI/admin. **Your part is 9–11**, and it's small — which is the point.
@@ -663,7 +664,7 @@ Steps 1–7 are all PKI/admin. **Your part is 9–11**, and it's small — which
 
 **Repo:** [`notation-signing.md`](notation-signing.md) ·
 [`trust/README.md`](../container-vulnerability-exemption/trust/README.md) ·
-[`bootstrap/main.tf`](../container-vulnerability-exemption.tf/terraform/bootstrap/main.tf) ·
+[`main.tf`](../container-vulnerability-exemption.tf/terraform/main.tf) ·
 [`variables.tf`](../container-vulnerability-exemption.tf/terraform/variables.tf) ·
 [`sign-image.sh`](../container-vulnerability-exemption/unikube/scripts/sign-image.sh)
 

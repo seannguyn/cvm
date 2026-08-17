@@ -1,5 +1,26 @@
 # Implementation Plan — new_direction.md (review before build)
 
+> ## ⚠ PARTLY SUPERSEDED by [`terraform-rework_PLAN.md`](terraform-rework_PLAN.md)
+>
+> **Still current:** the admission model this document exists to establish — signature-based
+> compliance, NOTARY over cosign, no compliant allowlist, no compliance-bot, one ignore rule
+> per exemption, enforcement per env.
+>
+> **No longer true**, everything in here about terraform topology and CI:
+>
+> | this document says | now |
+> | --- | --- |
+> | a `bootstrap/` module in its own state | no bootstrap; **one state per Wiz tenant** holds everything |
+> | clusters read `validator_id` from bootstrap remote state (Q2) | plain in-state resource reference |
+> | one apply = one cluster, `unikube/wiz-<tenant>/<env>-<cluster>.tfstate` | one apply = the whole tenant, `unikube/wiz-<tenant>.tfstate` |
+> | golden `cst-container-vuln-default` + `golden.yaml` (Q7) | **deleted**, along with the informational scan step |
+> | `compute_matrix.py` computes affected clusters | **deleted**; one job, no matrix |
+> | env-global exemptions materialized per cluster with a `-global-` marker | **ONE shared rule per env**, `ignore-<env>-global-<name>` |
+> | engine/schema pins per env or cluster | per **Wiz tenant**, in `exemptions/tenants.yaml` |
+>
+> The Q&A below is kept as the decision record for the signature model. Do not read its
+> terraform sections as a description of the code.
+
 **Nothing implemented yet.** Review, answer the inline questions, and I'll build from your
 answers. This supersedes the compliant-allowlist parts of `tweak_PLAN.md`.
 

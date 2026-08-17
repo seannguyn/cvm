@@ -254,7 +254,7 @@ day-to-day issuance; only the leaf is short-lived and reaches CI.
 
 Three tiers specifically because the trust store is the *only* lever Wiz gives us, so the
 anchor must be stable. Leaf and intermediate rotation both leave `trust/ca.crt` untouched —
-no Wiz change, no bootstrap apply, nothing already signed invalidated. Only root replacement
+no Wiz change, no terraform apply, nothing already signed invalidated. Only root replacement
 is a hard cutover, and roots last a decade.
 
 ### Consequences

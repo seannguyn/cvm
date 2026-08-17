@@ -79,7 +79,7 @@ Notation asks two separate questions:
 
 | Layer | Question | Where |
 |---|---|---|
-| **Trust store** | does the chain terminate in a CA we trust? | `trust/ca.crt` → `notary_ca_certificate` |
+| **Trust store** | does the chain terminate in a CA we trust? | `trust/*.crt` → `notary_ca_certificates` |
 | **`trustedIdentities`** | is the *signing certificate* ours? | trust policy — **Wiz has no equivalent** |
 
 Per the spec, `trustedIdentities: ["*"]` means *"any signing certificate issued by a CA in

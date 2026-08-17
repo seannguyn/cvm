@@ -69,7 +69,8 @@ certificate** (no internet, so Sigstore's keyless/Fulcio/Rekor is out). For that
 - Signatures are OCI artifacts attached via the **referrers API (ORAS)** — fully offline.
 
 In this repo: Wiz's **shared image-integrity validator** is configured with `method = NOTARY`
-and the **CA certificate** as its trust root (bootstrap var `notary_ca_certificate`). The
+and the **CA certificates** as its trust roots (terraform var `notary_ca_certificates`, a
+list rendered from every `trust/*.crt`). The
 unikube workflow runs `notation sign` on compliant images; Wiz verifies the Notation
 signature at admission. `scripts/gen_signing_certs.sh` produces a local test CA + signing
 cert (openssl). Everything in §3–§6 below (cosign) is background/comparison — the *mechanism*
@@ -171,11 +172,10 @@ durable, auditable proof.
 The unikube workflow (`.github/workflows/unikube.yaml`) does, per target cluster:
 
 1. **Build.**
-2. **Informational** Wiz scan against the golden `cst-container-vuln-default` (AUDIT — never blocks).
-3. **Static** base-image check — every `FROM` must be `container-soe.registry.domain/*`.
-4. **Authoritative** check — `docker inspect` the built image's base-layer **digests** +
+2. **Static** base-image check — every `FROM` must be `container-soe.registry.domain/*`.
+3. **Authoritative** check — `docker inspect` the built image's base-layer **digests** +
    the final base image's `.Created` (freshness ≤ 30 days). **Digests, not labels.**
-   Steps 3 and 4 are both `compliance_check.py`: it shells out to docker itself, so the
+   Steps 2 and 3 are both `compliance_check.py`: it shells out to docker itself, so the
    rules live in one place rather than half in a script and half in workflow YAML. If
    docker cannot answer, the verdict is **not compliant** (fail closed) — "compliant" means
    signed and admitted fleet-wide unattended, so it must never be the fallback.
@@ -186,7 +186,7 @@ The unikube workflow (`.github/workflows/unikube.yaml`) does, per target cluster
    `container-soe.registry.domain/*`, i.e. our own SOE team. It would be worthless for a
    third-party base. This is a weaker guarantee than the layer-digest check and a different
    one from "never trust labels" (labels are set by the *tenant*, on their own image).
-5. **Branch:**
+4. **Branch:**
    - **Compliant** → `docker push`, then `notation sign` the pushed **digest** (NOTARY / CA
      cert). Wiz's shared NOTARY validator verifies the signature at admission → admitted
      **fleet-wide**. No YAML, no PR.
@@ -202,7 +202,7 @@ be repointed between the compliance check and the signature.
 
 Admission needs no attestation here — the **signature is the gate** (see §2b). Attestation
 (SLSA provenance / a compliance predicate) is optional audit-trail only. The trust root is a
-**CA cert** you manage (bootstrap `notary_ca_certificate`), not Sigstore.
+**CA cert** you manage (`notary_ca_certificates`), not Sigstore.
 
 > Mock note: there is no real registry/OIDC in this repo, so the cosign calls in
 > `unikube.yaml` are **stubbed** (echo + a placeholder digest). The step order and the
@@ -322,7 +322,7 @@ Kubernetes also documents verifying its release images + binaries end-to-end —
 ```bash
 IMG="ecr/tenant_Y_image:1.0.0"
 
-# One-time: trust the CA (matches the Wiz validator's notary_ca_certificate) + register a key
+# One-time: trust the CA (matches the Wiz validator's notary_ca_certificates) + register a key
 notation cert add --type ca --store soe ./trust/ca.crt   # the ROOT — never the intermediate
 # (key via a KMS/HSM plugin in prod; file key shown for the local test cert)
 notation key add --plugin <kms-plugin> --id <key-id> soe-signer   # or a file-based key

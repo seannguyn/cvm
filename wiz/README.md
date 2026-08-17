@@ -2,8 +2,8 @@
 
 Mock implementation of the two-repo system for managing Wiz container-vulnerability
 exemptions and admission across the unikube fleet. Design notes in `project_metadata/`
-(see `8_project_implementation_0.md` for the authoritative goal and
-`8_project_implementation_WALKTHROUGH.md` for what was built).
+(`project_summary.md` for current state, `new_direction_PLAN.md` for the signature-based
+admission model, `terraform-rework_PLAN.md` for the single-state topology).
 
 ## The two repos
 
@@ -12,44 +12,47 @@ exemptions and admission across the unikube fleet. Design notes in `project_meta
 | [`container-vulnerability-exemption`](container-vulnerability-exemption) | YAML **interface** — schema-validated config | Customers + Platform + Security |
 | [`container-vulnerability-exemption.tf`](container-vulnerability-exemption.tf) | Terraform **engine** — creates the Wiz resources (blackbox provider), git-tag versioned | Platform / Security |
 
-The original single-cluster reference the engine module was built from was parked in
-`out/` (a gitignored scratch dir), so it is intentionally **not** committed.
-
 ## Model
 
-- **5 Wiz objects per cluster:** a Vulnerability scan policy + its ignore rule
-  (`self_built`, `name_v2`), an image-integrity validator, an Image-Trust admission
-  policy + its ignore rule (`vendor_or_oss`, `image_name`). Named `cst-container-vuln-*`
-  and `cst-container-image-trust-*`.
-- **Golden default** `cst-container-vuln-default` is fleet-wide, lives in its own
-  bootstrap state, and is referenced read-only by each cluster.
-- **Promotion axis = Wiz tenant** (`nonprod` → gated → `prod`), chosen by SA
-  credentials — not the k8s env.
-- **One apply = one cluster**, state key `unikube/wiz-<tenant>/<env>-<cluster>.tfstate`.
-  CI/CD compute which clusters a PR touches (a `global.yaml` change fans out to the
-  whole env) and plan/apply only those, in parallel.
+- **Admission is by signature.** Compliant self-built images are Notation-signed and admitted
+  fleet-wide by the shared NOTARY validator. Non-compliant images need a merged, security-
+  approved exemption. There is no vuln scan policy and no compliant allowlist.
+- **Wiz objects:** one shared `cst-container-image-validator-default`; one
+  `cst-container-image-trust-<env>-<cluster>` Image-Trust policy per cluster; and ignore rules
+  at two scopes — `ignore-<env>-global` (ONE per env, shared by every cluster in it) and
+  `ignore-<env>-<cluster>` (that cluster's own).
+- **Ignore rules are AGGREGATED** because Wiz caps them per tenant: all of a scope's
+  exemptions live in one rule's `starts_with` list, so a cluster references **at most two**
+  rules however many exemptions it has. The cost: matching is always prefix-based
+  (no regex, no exact-match) and **nothing expires** — an exemption lives until its YAML line
+  is deleted.
+- **One apply = the whole fleet for one Wiz tenant**, state key `unikube/wiz-<tenant>.tfstate`.
+  Any change under `unikube/exemptions/**` or `trust/**` triggers one plan per tenant; a
+  deleted cluster file is an ordinary destroy in that plan.
+- **Promotion axis = Wiz tenant** (`nonprod` → gated → `prod`), chosen by SA credentials —
+  not the k8s env.
 - **Enforcement** (AUDIT/BLOCK) is set per-env in `global.yaml`, overridable per cluster.
-- **Engine version** is pinned per-env in `global.yaml`, overridable per cluster;
-  the cluster pin wins.
+- **Engine + schema version** are pinned per Wiz tenant in `unikube/exemptions/tenants.yaml`
+  — one apply per tenant can clone exactly one engine tag, so bumping nonprod, verifying,
+  then bumping prod *is* the rollout.
 
 ## Folder shape
 
 ```
 container-vulnerability-exemption/          # interface (per-platform layout)
   README.md  CODEOWNERS
+  trust/*.crt                               # NOTARY trust anchors, security-owned
   unikube/                                  # the unikube platform
+    exemptions/tenants.yaml                 # engine + schema pins, per Wiz tenant
     exemptions/{dev,nonprod,preprod,prod}/{global,<CLUSTER>}.yaml
     schemas/  scripts/  tests/  README.md
   pck/                                      # different team, out of scope (stub)
-  .github/workflows/  terraform.yaml unikube.yaml wiz-scan.yaml(parked)
+  .github/workflows/  terraform.yaml unikube.yaml
   .github/actions/tf/  action.yaml
 container-vulnerability-exemption.tf/       # engine
   terraform/
-    main.tf providers.tf variables.tf versions.tf backend.tf outputs.tf
-    modules/cluster_policy_set/             # the 5 objects, one cluster
-    bootstrap/                              # golden cst-container-vuln-default, own state
-    examples/anp07.auto.tfvars.json
-out/wiz-policies.tf                         # original reference (gitignored scratch, not committed)
+    main.tf locals.tf providers.tf variables.tf versions.tf backend.tf outputs.tf
+    examples/fleet.auto.tfvars.json
 ```
 
 ## Try it (no Wiz tenant needed)
@@ -59,7 +62,7 @@ cd container-vulnerability-exemption/unikube
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r scripts/requirements.txt
 python3 scripts/validate.py
-python3 scripts/mock_plan.py dev/anp07
+python3 scripts/mock_plan.py          # the whole fleet; add <env>/<cluster> to narrow
 python3 -m pytest -q
 ```
 
