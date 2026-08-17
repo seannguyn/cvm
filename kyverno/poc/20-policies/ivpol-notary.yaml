@@ -1,0 +1,106 @@
+# The main test policy: admit only images from the SOE registry that carry a Notation
+# signature chaining to our standalone signing root (ADR-0001, ADR-0003).
+#
+# Starts in Audit with failurePolicy Ignore. Do not flip either until §5.9 / §7 P10.
+#
+# apiVersion note: policies.kyverno.io/v1 is served on v1.18.2 and on main. The cluster
+# stores it as v1beta1 either way; `kubectl get -o yaml` will show v1beta1 back.
+#
+# The attestor name MUST be a bare CEL identifier -- it is referenced as `attestors.notary`.
+# A name with a hyphen ("soe-root") forces `attestors["soe-root"]` and is a common source of
+# "undeclared reference" compile errors. Keep it boring.
+---
+apiVersion: policies.kyverno.io/v1
+kind: ImageValidatingPolicy
+metadata:
+  name: soe-notary-signed
+  annotations:
+    policies.kyverno.io/description: >-
+      Images from the SOE registry must carry a Notation signature that chains to the
+      container-signing root CA. Test material -- see kyverno/README.md.
+spec:
+  # Audit first. [Deny] for test 5.9.
+  validationActions:
+    - Audit
+
+  # Ignore first. Fail is what production would use, and is what P10/P12 measure.
+  failurePolicy: Ignore
+
+  webhookConfiguration:
+    # Cold-cache Notary verification is ~4 registry round trips. 15s leaves headroom for a
+    # slow registry without sitting on the Kubernetes 30s ceiling. P11 drives this to 1s
+    # deliberately.
+    timeoutSeconds: 15
+
+  evaluation:
+    admission:
+      enabled: true
+    background:
+      # OFF for the functional suite: background scan re-verifies every matched image every
+      # backgroundScanInterval from the REPORTS controller, which is a separate registry
+      # egress path and would muddy the admission-latency numbers. Turn it on for P17.
+      enabled: false
+
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["pods"]
+
+  # Only images from the SOE registry are in scope. Anything else is SKIPPED, not passed --
+  # see test 5.4, and note F3: on v1.18.2 nothing catches the skipped ones. That is what
+  # ivpol-catchall.yaml is for.
+  matchImageReferences:
+    - glob: "container-soe.registry.domain/*"
+
+  attestors:
+    - name: notary
+      notary:
+        # Replace with the real root PEM. 10-trust/render-attestor.sh does the indentation
+        # correctly; hand-editing this block is the most common apply failure.
+        #
+        # The trust anchor is the ROOT, not the intermediate -- ADR-0003 option B1 was
+        # rejected precisely because pinning an intermediate breaks on its rotation.
+        certs:
+          value: |
+            -----BEGIN CERTIFICATE-----
+            REPLACE_WITH_ROOT_CA_PEM
+            -----END CERTIFICATE-----
+        # tsaCerts: only if signatures are trust-timestamped. ADR-0001 deliberately does NOT
+        # timestamp, so the leaf's validity window is checked against now -- which is the
+        # "coarse revocation for free" property. Leave this unset to preserve it.
+
+  validations:
+    # verifyImageSignatures returns an INT (the number of attestors that verified), not a
+    # bool. `> 0` is required; without it the expression fails to compile.
+    - expression: >-
+        images.containers.all(image, verifyImageSignatures(image, [attestors.notary]) > 0)
+      message: >-
+        Image is not signed by the container-signing root CA. Self-built compliant images are
+        signed by CI automatically; anything else needs an approved PolicyException.
+    - expression: >-
+        images.initContainers.all(image, verifyImageSignatures(image, [attestors.notary]) > 0)
+      message: >-
+        Init container image is not signed by the container-signing root CA.
+    - expression: >-
+        images.ephemeralContainers.all(image, verifyImageSignatures(image, [attestors.notary]) > 0)
+      message: >-
+        Ephemeral container image is not signed by the container-signing root CA.
+      # CAVEAT: `kubectl debug` adds an ephemeral container through the
+      # pods/ephemeralcontainers SUBRESOURCE, which does not match
+      # `resources: ["pods"]` above. This expression therefore only fires for ephemeral
+      # containers present at CREATE. To gate `kubectl debug` you need
+      # `resources: ["pods/ephemeralcontainers"]` in matchConstraints as well -- worth
+      # testing explicitly, since "attach an unsigned debug image to a running pod" is
+      # precisely the bypass someone will find.
+
+  validationConfigurations:
+    # Rewrites tags to digests. Defaults to true, which means a MUTATING webhook is registered
+    # for this policy. On v1.18.2 the mutating webhook is registered regardless (F4) and is
+    # where verification actually happens; on main it is only registered when this is true.
+    # Test 5.10 exercises the rewrite; P2b measures the cost of turning it off.
+    mutateDigest: true
+    verifyDigest: true
+    # Defaults to true. INERT on v1.18.2 (F3) -- verify with test 5.5 before relying on it.
+    required: true

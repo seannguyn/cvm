@@ -1,0 +1,77 @@
+# Variant: trust anchor sourced from a ConfigMap instead of inlined in the policy.
+#
+# WHY: with the PEM inlined, rotating the trust anchor is a policy edit -- which changes the
+# policy's resourceVersion, which invalidates EVERY image-verify cache entry for that policy
+# (the cache key is policyUID;resourceVersion;ruleName;imageRef). So an anchor rotation is
+# also a fleet-wide cold-cache event. Sourcing the cert from a ConfigMap decouples the two,
+# and is the closest Kyverno gets to the "stable trust store, rotate independently" property
+# that ADR-0003 built the three-tier PKI to get.
+#
+# Worth measuring in §7: confirm that updating the ConfigMap does NOT bump the policy's
+# resourceVersion, and therefore does not flush the cache. If it silently keeps serving the
+# OLD anchor from cache after a rotation, that is a finding -- record the staleness window.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: image-signing-trust
+  namespace: kyverno
+data:
+  # Populate from wiz/container-vulnerability-exemption/trust/ca.crt
+  #   kubectl -n kyverno create configmap image-signing-trust \
+  #     --from-file=ca.crt=../wiz/container-vulnerability-exemption/trust/ca.crt \
+  #     --dry-run=client -o yaml | kubectl apply -f -
+  ca.crt: |
+    -----BEGIN CERTIFICATE-----
+    REPLACE_WITH_ROOT_CA_PEM
+    -----END CERTIFICATE-----
+---
+apiVersion: policies.kyverno.io/v1
+kind: ImageValidatingPolicy
+metadata:
+  name: soe-notary-signed-cm
+spec:
+  validationActions: [Audit]
+  failurePolicy: Ignore
+  webhookConfiguration:
+    timeoutSeconds: 15
+  evaluation:
+    admission:
+      enabled: true
+    background:
+      enabled: false
+
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["pods"]
+
+  matchImageReferences:
+    - glob: "container-soe.registry.domain/*"
+
+  attestors:
+    - name: notary
+      notary:
+        certs:
+          # `expression` is CEL evaluated at policy-compile time. resource.Get(...) reads the
+          # ConfigMap through Kyverno's resource library; the admission controller's RBAC must
+          # allow reading ConfigMaps in the kyverno namespace (it does by default).
+          #
+          # VERIFY THIS ON YOUR VERSION before trusting it -- the resource library's exact
+          # shape has moved between releases. If it does not compile, the policy is rejected
+          # at apply time with a field error naming spec.attestors[0], which is a clean
+          # failure. Fall back to the inlined variant if so.
+          expression: >-
+            resource.Get("v1", "configmaps", "kyverno", "image-signing-trust").data["ca.crt"]
+
+  validations:
+    - expression: >-
+        images.containers.all(image, verifyImageSignatures(image, [attestors.notary]) > 0)
+      message: "Image is not signed by the container-signing root CA."
+
+  validationConfigurations:
+    mutateDigest: true
+    verifyDigest: true
+    required: true

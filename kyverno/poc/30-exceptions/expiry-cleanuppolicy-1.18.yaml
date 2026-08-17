@@ -1,0 +1,72 @@
+# Composed expiry for v1.18.2, which has no PolicyException.expiresAt.
+#
+# This is the thing ADR-0002 rationale 3 was pointing at: "Kyverno can expire exceptions, but
+# by composing a generated ClusterCleanupPolicy or a TTL label -- a pattern you assemble and
+# then have to keep working, per cluster." Here it is assembled. Judge the rationale against
+# the actual object, not the description.
+#
+# Requires the CLEANUP CONTROLLER to be running. On a Kyverno install trimmed down to
+# "config policy only" it may not be -- 00-prereqs/check-kyverno.sh flags this.
+#
+# Known gaps, all of which are the reason the v1.19 field is better:
+#   - Deletion happens on the cleanup schedule, so there is a live-but-expired window.
+#   - The date lives in a label, so a typo is an exemption that never expires (or expires
+#     immediately). guardrail-vpol.yaml validates the format.
+#   - This object is one more thing per cluster that has to exist, be correct, and stay
+#     correct -- across ~200 of them.
+---
+apiVersion: kyverno.io/v2
+kind: ClusterCleanupPolicy
+metadata:
+  name: expire-policy-exceptions
+spec:
+  # Every 10 minutes. Tighten and the cleanup controller does more list work; loosen and the
+  # live-but-expired window grows. Record whichever you pick in the results table, because it
+  # IS the expiry precision -- test 6.5.
+  schedule: "*/10 * * * *"
+  match:
+    any:
+      - resources:
+          kinds:
+            - PolicyException
+          namespaces:
+            - kyverno-exceptions
+          selector:
+            matchExpressions:
+              - key: exemption.unikube.io/expires
+                operator: Exists
+  conditions:
+    all:
+      # The label is YYYY-MM-DD because a Kubernetes label value cannot contain ':', so it
+      # cannot hold a full RFC3339 timestamp. join('') pads it back out to one.
+      # time_before/time_now_utc are Kyverno JMESPath functions and both take/return RFC3339
+      # strings -- do NOT reach for time_parse here, its signature is time_parse(layout, ts)
+      # and it is not needed once the value is already RFC3339.
+      - key: >-
+          {{ time_before(join('', [target.metadata.labels."exemption.unikube.io/expires", 'T00:00:00Z']), time_now_utc()) }}
+        operator: Equals
+        value: true
+        message: "PolicyException expiry date has passed"
+---
+# Guardrail for the label format. Without this, `expires: "next friday"` produces a cleanup
+# policy that errors on every evaluation and an exemption that lives forever.
+apiVersion: policies.kyverno.io/v1
+kind: ValidatingPolicy
+metadata:
+  name: policyexception-expiry-label-format
+spec:
+  validationActions: [Deny]
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["policies.kyverno.io", "kyverno.io"]
+        apiVersions: ["*"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["policyexceptions"]
+  validations:
+    - expression: >-
+        has(object.metadata.labels) &&
+        'exemption.unikube.io/expires' in object.metadata.labels &&
+        object.metadata.labels['exemption.unikube.io/expires'].matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$')
+      message: >-
+        PolicyException must carry label exemption.unikube.io/expires in YYYY-MM-DD format.
+        On Kyverno v1.19+, use spec.expiresAt instead.

@@ -1,0 +1,88 @@
+# Policy over policy: constrain what a PolicyException is allowed to look like.
+#
+# WHY: --exceptionNamespace restricts WHERE exceptions are honoured. It does not restrict what
+# they can do. spec.matchConditions is unrestricted CEL, so a single well-formed exception can
+# exempt every workload the referenced policy matches. Test 6.6 demonstrates this with
+# `expression: "true"`.
+#
+# In the Wiz model the equivalent guardrails are whatever the tenant's ignore-rule schema and
+# RBAC enforce centrally. Under Kyverno you build them, per cluster, out of Kyverno. That is a
+# fair cost to put in the comparison -- and it is also a demonstration that the cost is
+# bounded and expressible, which the ADR's rationale 2 does not currently acknowledge.
+#
+# Ship this ALONGSIDE the exemption namespace, not after. An exemption namespace without it is
+# a fleet-wide bypass waiting to be written.
+---
+apiVersion: policies.kyverno.io/v1
+kind: ValidatingPolicy
+metadata:
+  name: policyexception-guardrails
+spec:
+  validationActions: [Deny]
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["policies.kyverno.io"]
+        apiVersions: ["*"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["policyexceptions"]
+
+  validations:
+    # 1. No blanket exemptions. A matchCondition that ignores the object entirely exempts
+    #    everything the referenced policy matches -- test 6.6.
+    #    `has()` guard first: matchConditions is optional on the CRD, and an unguarded field
+    #    access on a missing field is a CEL runtime error, which failurePolicy: Fail turns
+    #    into "you cannot create any PolicyException at all".
+    #    No .trim() -- that is a CEL strings-extension function and is not guaranteed to be
+    #    registered in this environment. contains('object.') is enough to reject `true`,
+    #    `1 == 1` and friends.
+    - expression: >-
+        has(object.spec.matchConditions) &&
+        size(object.spec.matchConditions) > 0 &&
+        object.spec.matchConditions.all(mc, mc.expression.contains('object.'))
+      message: >-
+        Every matchCondition must reference `object.`. A PolicyException that does not inspect
+        the resource exempts every workload the referenced policy matches.
+
+    # 2. Must name its targets explicitly. An empty policyRefs is caught by the CRD, but a ref
+    #    to a policy that does not exist is a silent no-op that looks like an active exemption
+    #    in a review -- so require the kind at least be one we expect.
+    - expression: >-
+        size(object.spec.policyRefs) > 0 &&
+        object.spec.policyRefs.all(r,
+          r.kind in ['ImageValidatingPolicy', 'NamespacedImageValidatingPolicy', 'ValidatingPolicy'])
+      message: "policyRefs must name at least one policy, with a recognised kind."
+
+    # 3. Ticket, reason and approver. On v1.19 these are spec.properties; on v1.18 they are
+    #    annotations. Accept either so the same guardrail works across the version boundary.
+    - expression: >-
+        (has(object.spec.properties) &&
+          'ticket' in object.spec.properties &&
+          'reason' in object.spec.properties &&
+          'approved-by' in object.spec.properties)
+        ||
+        (has(object.metadata.annotations) &&
+          'exemption.unikube.io/ticket' in object.metadata.annotations &&
+          'exemption.unikube.io/reason' in object.metadata.annotations &&
+          'exemption.unikube.io/approved-by' in object.metadata.annotations)
+      message: >-
+        PolicyException must record reason, ticket and approved-by -- in spec.properties
+        (Kyverno v1.19+) or in exemption.unikube.io/* annotations (v1.18).
+
+    # 4. Must carry an expiry. An exemption without an end date is a permanent policy change
+    #    made without a policy review, which is the failure mode the exemption workflow exists
+    #    to prevent.
+    #
+    #    PRESENCE ONLY, deliberately. Bounding it to 90 days needs a "now" in CEL, and there is
+    #    no portable one here -- k8s CEL has no now(), and Kyverno's time helpers are JMESPath,
+    #    not CEL. Rather than ship an expression that compiles on one version and not another,
+    #    the 90-day bound belongs in CI on the GitOps repo, which is where the human approval
+    #    happens anyway and where a failure is a red PR rather than a blocked API call.
+    - expression: >-
+        has(object.spec.expiresAt)
+        ||
+        (has(object.metadata.labels) &&
+          'exemption.unikube.io/expires' in object.metadata.labels)
+      message: >-
+        PolicyException must carry an expiry -- spec.expiresAt (Kyverno v1.19+) or the
+        exemption.unikube.io/expires label plus the ClusterCleanupPolicy (v1.18).

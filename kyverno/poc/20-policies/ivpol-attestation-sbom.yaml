@@ -1,0 +1,96 @@
+# Attestation verification (test 5.11).
+#
+# THE CONSTRAINT THAT MATTERS: with a notary attestor, only `referrer` attestations work --
+# OCI 1.1 artifacts attached to the image via the referrers API. `intoto` attestations are
+# Cosign-only; Kyverno errors with
+#
+#     notary verifier only supports oci 1.1 referrers as attestations
+#
+# (pkg/cel/libs/imageverify/impl.go). So the SBOM has to be pushed as an OCI referrer with
+# `oras attach --artifact-type ...` and then signed with `notation sign` against the SBOM
+# artifact's own digest -- it is a second signing operation, not a side effect of signing the
+# image. scripts/build-fixtures.sh does this.
+#
+# WHY IT IS INTERESTING FOR THE ADR: this is the one place Kyverno could plausibly narrow
+# ADR-0002 rationale 1 (one exemption mechanism). If CI attaches a signed vulnerability-scan
+# attestation, a policy can gate admission on the CONTENT of that attestation -- e.g. "no
+# critical CVEs, scan newer than 7 days" -- via extractPayload(). That is not a vulnerability
+# exemption workflow, but it is admission-time vulnerability policy, which Kyverno was
+# assumed not to have at all. Worth an honest look before concluding rationale 1 is untouched.
+---
+apiVersion: policies.kyverno.io/v1
+kind: ImageValidatingPolicy
+metadata:
+  name: soe-notary-sbom
+spec:
+  validationActions: [Audit]
+  failurePolicy: Ignore
+  webhookConfiguration:
+    # Attestation verification adds a referrers listing plus a fetch and verify per candidate
+    # artifact, on top of the image signature check. Budget more time than the plain policy.
+    timeoutSeconds: 25
+  evaluation:
+    admission:
+      enabled: true
+    background:
+      enabled: false
+
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["pods"]
+
+  matchImageReferences:
+    - glob: "container-soe.registry.domain/*"
+
+  attestors:
+    - name: notary
+      notary:
+        certs:
+          value: |
+            -----BEGIN CERTIFICATE-----
+            REPLACE_WITH_ROOT_CA_PEM
+            -----END CERTIFICATE-----
+
+  attestations:
+    - name: sbom
+      referrer:
+        # Must match the --artifact-type used when the SBOM was attached.
+        type: application/spdx+json
+    - name: scan
+      referrer:
+        type: application/vnd.cncf.notary.scan-result.v1+json
+
+  validations:
+    # 1. the image itself is signed
+    - expression: >-
+        images.containers.all(image, verifyImageSignatures(image, [attestors.notary]) > 0)
+      message: "Image is not signed by the container-signing root CA."
+
+    # 2. a signed SBOM referrer exists
+    - expression: >-
+        images.containers.all(image,
+          verifyAttestationSignatures(image, attestations.sbom, [attestors.notary]) > 0)
+      message: "Image has no SBOM attestation signed by the container-signing root CA."
+
+    # 3. gate on the CONTENT of a signed scan attestation.
+    #    extractPayload() MUST come after a successful verifyAttestationSignatures() for the
+    #    same attestation, or it errors -- Kyverno will not hand you an unverified payload.
+    #    Adjust the field path to whatever the scanner actually emits; this is illustrative.
+    - expression: >-
+        images.containers.all(image,
+          verifyAttestationSignatures(image, attestations.scan, [attestors.notary]) > 0 &&
+          int(extractPayload(image, attestations.scan).summary.critical) == 0)
+      message: >-
+        Image has unaccepted critical vulnerabilities in its signed scan attestation.
+      # NOTE: this is the expression to point at when someone claims Kyverno cannot do
+      # anything about vulnerabilities. It cannot SCAN, and it has no triage UI, but it can
+      # enforce a scanner's signed verdict at admission. Whether that is worth anything
+      # depends entirely on whether the exemption workflow lives somewhere sane.
+
+  validationConfigurations:
+    mutateDigest: true
+    verifyDigest: true
+    required: true

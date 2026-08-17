@@ -1,0 +1,68 @@
+# Namespaced variant (test 5.6).
+#
+# WHY THIS MATTERS TO THE ADR: Wiz's image_integrity_validator has one field, `certificate`.
+# It cannot scope enforcement to a namespace, a team or a workload. Kyverno can, four ways:
+#
+#   1. NamespacedImageValidatingPolicy   -- this file; policy lives in and applies to one ns
+#   2. matchConstraints                  -- GVR + operations
+#   3. matchConditions                   -- arbitrary CEL over the admission request
+#   4. matchImageReferences              -- glob/CEL over the image reference
+#
+# This is a genuine Kyverno advantage and it is NOT signer-identity pinning (F1). It restricts
+# where a policy applies, not who is allowed to have signed. A holder of any cert under the
+# trusted root can still sign an image that lands in scope. Do not conflate the two in the
+# writeup -- that conflation is how ADR-0003 ended up with a false claim in it.
+#
+# Rollout use: this is how you'd stage enforcement -- Deny in one namespace, Audit everywhere
+# else -- which is materially safer than a fleet-wide flag flip.
+---
+apiVersion: policies.kyverno.io/v1
+kind: NamespacedImageValidatingPolicy
+metadata:
+  name: soe-notary-signed
+  namespace: ivpol-test
+spec:
+  validationActions: [Deny]
+  failurePolicy: Ignore
+  webhookConfiguration:
+    timeoutSeconds: 15
+  evaluation:
+    admission:
+      enabled: true
+    background:
+      enabled: false
+
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["pods"]
+
+  matchImageReferences:
+    - glob: "container-soe.registry.domain/*"
+
+  attestors:
+    - name: notary
+      notary:
+        certs:
+          value: |
+            -----BEGIN CERTIFICATE-----
+            REPLACE_WITH_ROOT_CA_PEM
+            -----END CERTIFICATE-----
+
+  validations:
+    - expression: >-
+        images.containers.all(image, verifyImageSignatures(image, [attestors.notary]) > 0)
+      message: "Image is not signed by the container-signing root CA."
+
+  validationConfigurations:
+    mutateDigest: true
+    verifyDigest: true
+    required: true
+
+# NOTE for the test: `http.*` CEL functions are forbidden in namespaced policies unless the
+# admission controller runs with --allowHTTPInNamespacedPolicies. Not needed here, but if you
+# extend this policy with an HTTP call it will be rejected at apply time with
+# "http.* is not allowed in namespaced policies" -- which is a sensible guardrail worth
+# recording as a difference from the cluster-scoped variant.

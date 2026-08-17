@@ -1,0 +1,45 @@
+# v1.19+ ONLY. Applies cleanly on v1.18.2 -- and silently drops expiresAt and properties,
+# because they are not in that CRD schema. That is the worst possible failure mode for an
+# expiring exemption: it applies, it works, and it never expires.
+#
+# 40-functional/run.sh checks the served CRD schema before applying this file. Do the same in
+# any pipeline that ships these.
+#
+# This is the object that retires ADR-0002 rationale 3. Compare it directly against a Wiz
+# ignore rule: expiry enforced by the engine, reason/ticket/approver on the object, one
+# review path. What it still does not do is answer the vulnerability question -- rationale 1
+# is untouched -- and it lives in this cluster's etcd rather than a tenant API, which is
+# rationale 2.
+---
+apiVersion: policies.kyverno.io/v1
+kind: PolicyException
+metadata:
+  name: vendor-nginx-1-27
+  namespace: kyverno-exceptions
+spec:
+  policyRefs:
+    - name: deny-unverified-images
+      kind: ImageValidatingPolicy
+
+  # RFC3339. Filtered out by IsExpired() when the policy's exception set is listed during
+  # reconciliation -- NOT by a timer. Test 6.4 measures the lag between this timestamp and
+  # the first actual denial; quote that number, not this field, when comparing to Wiz's
+  # expired_at.
+  expiresAt: "2026-11-15T00:00:00Z"
+
+  # Free-form map. The CRD documents exactly these three keys as the intended use, which is
+  # the audit trail ADR-0002 wanted and did not think Kyverno had.
+  properties:
+    reason: "Vendor image, not self-built. No signature will ever exist."
+    ticket: "SEC-4471"
+    approved-by: "security-team"
+
+  matchConditions:
+    - name: vendor-nginx-exact-tag
+      expression: >-
+        object.spec.containers.exists(c, c.image == 'docker.io/library/nginx:1.27.3') &&
+        object.spec.containers.all(c,
+          c.image == 'docker.io/library/nginx:1.27.3' ||
+          c.image.startsWith('container-soe.registry.domain/'))
+
+  reportResult: skip

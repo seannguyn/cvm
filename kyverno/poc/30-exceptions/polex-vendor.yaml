@@ -1,0 +1,55 @@
+# Exempt a specific vendor image from the catch-all policy.
+#
+# THE IMPORTANT PART: the image match lives in matchConditions, NOT in spec.images.
+# spec.images is present on the CRD and does nothing for ImageValidatingPolicy -- see
+# 30-exceptions/README.md. It is included below, commented out, precisely so nobody
+# "helpfully" adds it back.
+#
+# Works on v1.18.2 and v1.19. For the v1.19 expiry fields see polex-expiresAt-1.19.yaml.
+---
+apiVersion: policies.kyverno.io/v1
+kind: PolicyException
+metadata:
+  name: vendor-nginx-1-27
+  # Must be inside --exceptionNamespace. Argo-managed in the real thing.
+  namespace: kyverno-exceptions
+  labels:
+    # v1.18.2 has no expiresAt, so expiry is composed from this label plus the
+    # ClusterCleanupPolicy in expiry-cleanuppolicy-1.18.yaml. On v1.19 use spec.expiresAt
+    # instead and drop the label.
+    exemption.unikube.io/expires: "2026-11-15"
+  annotations:
+    # On v1.19 these belong in spec.properties, where they are part of the API rather than
+    # a local convention. Keep the keys identical so the migration is mechanical.
+    exemption.unikube.io/reason: "Vendor image, not self-built. No signature will ever exist."
+    exemption.unikube.io/ticket: "SEC-4471"
+    exemption.unikube.io/approved-by: "security-team"
+spec:
+  policyRefs:
+    - name: deny-unverified-images
+      kind: ImageValidatingPolicy
+
+  matchConditions:
+    # Pin to an exact tag, not a prefix. `startsWith('docker.io/library/nginx')` would exempt
+    # every future nginx tag including ones nobody reviewed, which turns a one-image exemption
+    # into a standing one. If the pipeline pins by digest, match the digest instead -- that is
+    # strictly better and is what the base-comparison work in wiz/ already assumes.
+    - name: vendor-nginx-exact-tag
+      expression: >-
+        object.spec.containers.exists(c, c.image == 'docker.io/library/nginx:1.27.3') &&
+        object.spec.containers.all(c,
+          c.image == 'docker.io/library/nginx:1.27.3' ||
+          c.image.startsWith('container-soe.registry.domain/'))
+
+    # The second clause matters: without it, a pod containing the exempted nginx AND an
+    # arbitrary unsigned image would have the WHOLE POLICY skipped for that pod -- exceptions
+    # skip the policy for the resource, not for the image. This is the single most important
+    # thing to get right when writing IVP exceptions, and test 6.6 exists to prove it.
+
+  # Report as `skip` (default) rather than `pass`, so exempted workloads stay visibly
+  # different from verified ones in `kubectl get polr -A`. `pass` would hide them.
+  reportResult: skip
+
+  # DO NOT UNCOMMENT -- inert for ImageValidatingPolicy, see 30-exceptions/README.md.
+  # images:
+  #   - "docker.io/library/nginx:1.27.3"

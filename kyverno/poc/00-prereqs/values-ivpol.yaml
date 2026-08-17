@@ -1,0 +1,82 @@
+# Helm values overlay for the ImageValidatingPolicy tests.
+#
+#   helm upgrade kyverno kyverno/kyverno -n kyverno --reuse-values -f 00-prereqs/values-ivpol.yaml
+#
+# --reuse-values matters: this is an OVERLAY. The fleet's existing config-policy values are
+# not reproduced here and must not be lost.
+#
+# Verify what actually landed with 00-prereqs/check-kyverno.sh, not by reading this file --
+# several of these keys have moved between chart versions.
+
+crds:
+  groups:
+    policies:
+      imagevalidatingpolicies: true
+      namespacedimagevalidatingpolicies: true
+      policyexceptions: true
+
+features:
+  policyExceptions:
+    # OFF BY DEFAULT. Without this every PolicyException applies cleanly, appears in
+    # `kubectl get polex`, and does nothing. This is the single most common wasted afternoon.
+    enabled: true
+    # NOT '*'. matchConditions is unrestricted CEL, so an exception honoured in any namespace
+    # is a cluster-wide bypass available to any namespace admin. See 30-exceptions/README.md.
+    namespace: kyverno-exceptions
+
+  registryClient:
+    allowInsecure: false
+    # 'default' alone does NOT do IRSA. ECR needs 'amazon'. Trim the rest -- each enabled
+    # helper is a credential lookup path the admission controller may try on a cache miss.
+    credentialHelpers:
+      - default
+      - amazon
+
+  backgroundScan:
+    # Leave the feature on (config policy needs it) but keep IVP out of it via
+    # spec.evaluation.background.enabled: false on each policy, until P17.
+    enabled: true
+    backgroundScanWorkers: 2
+    backgroundScanInterval: 1h
+
+  # Reports are how the Audit phase is read. Without imageVerify reporting the whole
+  # functional suite is blind.
+  reporting:
+    imageVerify: true
+    validate: true
+
+admissionController:
+  container:
+    extraArgs:
+      # These three have NO chart values in 1.18.2 or main -- extraArgs is the only route.
+      # Cache key is policyUID;policyResourceVersion;ruleName;imageRef, so editing a policy
+      # invalidates all of its entries. P4 sweeps maxSize; P2a disables the cache entirely to
+      # get the true per-verification cost.
+      imageVerifyCacheEnabled: true
+      imageVerifyCacheTTLDuration: 60m
+      imageVerifyCacheMaxSize: 1000
+
+  # The cache is in-process ristretto, per pod. Every replica has its own, every restart and
+  # every scale-out starts cold. More replicas = better throughput and a WORSE cache hit rate.
+  # Start at the fleet's existing replica count so P1 is a fair control, and vary it in P19.
+  replicas: 3
+
+  resources:
+    requests:
+      cpu: 500m
+      memory: 512Mi
+    limits:
+      memory: 2Gi
+      # No CPU limit on purpose: a CPU-throttled admission webhook turns into webhook timeouts,
+      # which failurePolicy: Fail turns into a cluster-wide deployment outage. Record actual
+      # usage in P19 and set requests from that.
+
+# Reports controller does the background scan. If P17 is in scope it needs the same registry
+# egress as the admission controller -- a second, easily-missed network path.
+reportsController:
+  resources:
+    requests:
+      cpu: 500m
+      memory: 512Mi
+    limits:
+      memory: 4Gi
