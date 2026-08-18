@@ -4,9 +4,14 @@
 
 This repository holds the design and implementation for container **admission** and
 **vulnerability-exemption** management across the unikube EKS fleet (~200 clusters, two Wiz
-tenants). This README is the decision record; the implementation lives under
-[`wiz/`](wiz/), with [`wiz/project_metadata/project_summary.md`](wiz/project_metadata/project_summary.md)
-as the current-state entry point.
+tenants). This README is the decision record. The implementation now spans one tenant-facing interface
+and **two competing backends** — see §4 — with
+[`project_metadata/project_summary.md`](project_metadata/project_summary.md) as the
+current-state entry point.
+
+> Three claims in this record have been corrected or retired since it was written, on the
+> evidence of reading the Kyverno source. They are marked inline (ADR-0002 rationale 3;
+> ADR-0003 consequences) rather than edited away. The decision itself stands.
 
 ---
 
@@ -149,9 +154,14 @@ reviewed YAML in this repo.
    drift and ~200 places to audit "who is currently exempt from what". Wiz ignore rules are
    central to the tenant. We still fan out *Terraform* per cluster, but the record of truth
    is one API, not 200 etcds.
-3. **Expiry is a first-class field.** A Wiz ignore rule carries `expired_at` and Wiz enforces
-   it. Kyverno can expire exceptions, but by composing a generated `ClusterCleanupPolicy` or
-   a TTL label — a pattern you assemble and then have to keep working, per cluster.
+3. ~~**Expiry is a first-class field.**~~ **RETIRED 2026-08-18.** True of Kyverno v1.18.2,
+   where expiry has to be composed from a `ClusterCleanupPolicy` and a TTL label. **v1.19 adds
+   `PolicyException.spec.expiresAt` and `spec.properties` (`reason`/`ticket`/`approved-by`),
+   enforced by the engine** — so this rationale does not survive the version the fleet is
+   moving to. It is left in place, struck through, because a rationale that quietly disappears
+   is worse than one shown to have expired. Note also that the aggregation forced on the Wiz
+   side by its ignore-rule cap means Wiz now has **no per-entry expiry at all** — the field is
+   real, but there is one of it per scope. On this axis Kyverno v1.19 is ahead.
 4. **It is where the security team already works.** The ignore rules are the same objects
    they already use for vulnerability triage; no second console, no reconciling "exempt in
    Kyverno" against "still open in Wiz".
@@ -185,7 +195,7 @@ who knows Kyverno would otherwise assume the comparison was not done carefully:
   wrong.
 - **Blast radius is concentrated.** One shared validator and one CA serve both tenants and
   every platform, so trust-root changes are fleet-wide events. See
-  [`wiz/container-vulnerability-exemption/trust/README.md`](wiz/container-vulnerability-exemption/trust/README.md).
+  [`container-vulnerability-exemption/trust/README.md`](container-vulnerability-exemption/trust/README.md).
 
 ### Open risks
 
@@ -268,9 +278,19 @@ is a hard cutover, and roots last a decade.
   `gen_signing_certs.sh` generates keys on disk and is test material only.
 - **Signatures must carry the complete chain** (leaf → intermediate → root); a bare leaf
   signs successfully and then fails verification at admission. `sign-image.sh` refuses one.
-- **DN discipline is kept regardless** (`C`, `ST`, `O`, `OU` on every leaf). Wiz cannot use
-  it today, but it makes local `notation verify` a real check and is a prerequisite for both
-  revisit paths — Wiz adding pinning, or a move to Kyverno, which supports it today.
+- **DN discipline is kept regardless** (`C`, `ST`, `O`, `OU` on every leaf). It makes local
+  `notation verify` a real check, and it is a prerequisite for the one revisit path that
+  remains: Wiz adding pinning.
+
+  > ⚠ **CORRECTED 2026-08-18.** This bullet used to say DN discipline was a prerequisite for
+  > "both revisit paths — Wiz adding pinning, or a move to Kyverno, **which supports it
+  > today**". That was **false**, and it mattered: it made Kyverno look like an escape hatch
+  > from this ADR's central problem. Kyverno builds the Notation trust policy in Go and
+  > hardcodes `TrustedIdentities: ["*"]` (`pkg/image/verifiers/ivpol/notary/helpers.go`, and
+  > identically for legacy `verifyImages`); the CRD's `notary` attestor exposes exactly two
+  > knobs, `certs` and `tsaCerts`. **Neither engine can pin a signer identity.** On both, the
+  > trust store is the only authorization boundary — which makes this ADR's standalone signing
+  > root necessary rather than merely tidy. Verified against `v1.18.2` and `main@1df9235`.
 
 ---
 
@@ -296,15 +316,21 @@ problem statement — but this was a judgement call, not a walkover.
 
 ## 4. What was built
 
-The [`wiz/`](wiz/) tree implements ADR-0001 and ADR-0002:
+**The layout changed on 2026-08-18.** There is no longer a `wiz/` tree with an empty `kyverno/`
+sibling. One tenant-facing interface now renders to **two backends**, kept deliberately
+comparable so the bake-off is decided on evidence rather than on which one was built:
 
-- [`wiz/project_metadata/project_summary.md`](wiz/project_metadata/project_summary.md) — current-state entry point.
-- [`wiz/container-vulnerability-exemption/unikube/README.md`](wiz/container-vulnerability-exemption/unikube/README.md) — the YAML interface: exemption schema, local verification.
-- [`wiz/container-vulnerability-exemption.tf/README.md`](wiz/container-vulnerability-exemption.tf/README.md) — the Terraform engine.
-- [`wiz/project_metadata/image-signing-101.md`](wiz/project_metadata/image-signing-101.md) — digests, labels, signing and cert-expiry primer.
+- [`project_metadata/project_summary.md`](project_metadata/project_summary.md) — current-state entry point.
+- [`container-vulnerability-exemption/`](container-vulnerability-exemption/README.md) — the interface. The only repo tenants edit.
+- [`container-vulnerability-exemption.wiz/`](container-vulnerability-exemption.wiz/README.md) — backend A, ADR-0002 as decided. Mature.
+- [`container-vulnerability-exemption.kyverno/`](container-vulnerability-exemption.kyverno/README.md) — backend B, Option A implemented. The challenger.
 
-[`kyverno/`](kyverno/) is an empty sibling, kept deliberately: if a revisit trigger fires,
-Option A gets implemented there rather than displacing the Wiz work.
+Option A is no longer hypothetical, so the revisit triggers below are cheaper to act on than
+when this ADR was written — but **the decision stands**. Rationales 1 and 2 are untouched by
+the Kyverno work: Kyverno still does not scan, so a `PolicyException` answers "may this image
+be admitted" and never "do we accept this CVE"; and the fan-out to ~200 etcds is now measurable
+rather than asserted (`kyverno_render.py --summary` prints the multiplier). Rationale 3 is
+retired and the ADR-0003 correction above stands regardless of which backend wins.
 
 ---
 
