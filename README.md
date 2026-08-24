@@ -155,7 +155,10 @@ reviewed YAML in this repo.
    central to the tenant. We still fan out *Terraform* per cluster, but the record of truth
    is one API, not 200 etcds.
 3. ~~**Expiry is a first-class field.**~~ **RETIRED 2026-08-18.** True of Kyverno v1.18.2,
-   where expiry has to be composed from a `ClusterCleanupPolicy` and a TTL label. **v1.19 adds
+   where nothing in the cluster retires an exemption: `spec.expiresAt` is declared on the CRD
+   and ignored by the engine (kyverno#16299 landed after that release), and the composed
+   `ClusterCleanupPolicy` + TTL-label pattern is no longer rendered — expiry there is enforced
+   at render time only. **v1.19 adds
    `PolicyException.spec.expiresAt` and `spec.properties` (`reason`/`ticket`/`approved-by`),
    enforced by the engine** — so this rationale does not survive the version the fleet is
    moving to. It is left in place, struck through, because a rationale that quietly disappears
@@ -302,7 +305,7 @@ is a hard cutover, and roots last a decade.
 | Already deployed here | **Yes** (configuration policy) | **Yes** (vuln management) |
 | Vulnerability scanning | Not included — bolt on Trivy or similar | Native |
 | Exemption object | `PolicyException` CRD, per cluster | Ignore rule, central per tenant |
-| Exemption expiry | Composed via cleanup policy / TTL label | Native `expired_at` field |
+| Exemption expiry | **Nothing enforces it on v1.18**; native `spec.expiresAt` on v1.19 | Native `expired_at` field — but one per scope, not per entry |
 | Exemptions for *vuln findings* | Separate system entirely | Same object |
 | Enforcement point | In-cluster webhook | In-cluster webhook |
 | Cost / lock-in | Free, CNCF | Commercial, already paid |
@@ -324,6 +327,17 @@ comparable so the bake-off is decided on evidence rather than on which one was b
 - [`container-vulnerability-exemption/`](container-vulnerability-exemption/README.md) — the interface. The only repo tenants edit.
 - [`container-vulnerability-exemption.wiz/`](container-vulnerability-exemption.wiz/README.md) — backend A, ADR-0002 as decided. Mature.
 - [`container-vulnerability-exemption.kyverno/`](container-vulnerability-exemption.kyverno/README.md) — backend B, Option A implemented. The challenger.
+
+What the challenger *ships* is the single-policy shape: one `ImageValidatingPolicy` globbing
+`"**"`, one `PolicyException` per exemption. It is deliberately the smallest thing that
+demonstrates signature enforcement, and it carries two known holes — it matches your own
+infrastructure images, and an exception exempts the whole pod rather than the image. Both are
+stated in the header of every generated file. **Two candidate designs that close them** —
+`advanced` and `platform`, differing over whether an exemption may name an image inside the
+signature policy's scope — live under
+[`container-vulnerability-exemption/poc/`](container-vulnerability-exemption/poc/MODEL-COMPARISON.md)
+behind a separate renderer, so that nobody runs one by accident and it quietly becomes what
+production depends on. They are rendered for one POC cluster and no other.
 
 Option A is no longer hypothetical, so the revisit triggers below are cheaper to act on than
 when this ADR was written — but **the decision stands**. Rationales 1 and 2 are untouched by
