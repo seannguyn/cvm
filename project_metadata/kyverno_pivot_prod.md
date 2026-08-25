@@ -29,7 +29,7 @@ single-image pod
 multi-images pod
 | scenario (signed/unsigned) | expected result | Actual result|
 | self-built signed + self-built unsigned | deny | deny |
-| self-built signed + self-built unsigned excepted | deny | admit. This is loophole for ivpol that needs address |
+| self-built unsigned + self-built unsigned excepted | deny | admit. This is loophole for ivpol that needs address |
 | vendor image + vendor image excepted | deny | admit |
 | vendor image + self-built unsigned image excepted | deny | admit. This is loophole for ivpol that needs address |
 The number of container images in pod can scale but we can expect same result right?

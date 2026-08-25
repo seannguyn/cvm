@@ -3,8 +3,19 @@
 Post to <https://github.com/kyverno/kyverno/issues/new/choose> → **Bug Report**.
 Everything below the line is the issue body.
 
-Before posting: re-check the linked issue states (this was written 2026-08-25), and replace
-`<registry>` with any registry you like — the behaviour does not depend on it.
+**Before posting — check these four things.** Two are measured here and two are not, and the
+difference matters in a bug report.
+
+| | status |
+|---|---|
+| The CEL error (`undeclared reference to 'exceptions'` in an ivpol) | **measured** on v1.18.2 — `history/poc/probe-cel.txt`, seven spellings, all fail |
+| A `PolicyException` skipping an ivpol for the whole resource | **measured** on a live cluster — `history/poc/run-tests.sh` case 6 asserts ADMIT and passed |
+| `spec.images` failing to narrow an ivpol exception | **inferred**, not separately recorded. Run the three steps below on your cluster and confirm the pod is admitted before claiming it upstream. |
+| That the same expression works on a `ValidatingPolicy` | **not tested here.** The probe only ever created an `ImageValidatingPolicy`. This issue therefore does not assert it — the claim rests on kyverno#13817 having shipped the feature for vpol, which is public. Do not add "the identical expression compiles on a ValidatingPolicy" back in unless you have run it: the expression shown also calls `verifyImageSignatures`, which a `ValidatingPolicy` may not have at all. |
+
+Also: re-check the linked issue states (this was written 2026-08-25), confirm the version table
+matches the cluster you reproduce on, and replace `<registry>` with any registry you like — the
+behaviour does not depend on it.
 
 The long-form version, with the full archaeology of how the gap arose and a 25-row index of
 every related issue and KDP, is in
@@ -34,7 +45,9 @@ notes behind this; do not post both.
 ## Description
 
 `ValidatingPolicy` and `ImageValidatingPolicy` behave differently in a way that is not
-documented, and the difference goes the wrong way for image verification:
+documented, and the difference goes the wrong way for image verification. (The
+`ValidatingPolicy` column below is from kyverno#13817 and KDP#77 rather than from a run on my
+side; the `ImageValidatingPolicy` column is what I measured.)
 
 |  | `ValidatingPolicy` | `ImageValidatingPolicy` |
 |---|---|---|
@@ -56,6 +69,12 @@ Silent acceptance is the part that causes harm.
 Two containers, one legitimately exempt and one not.
 
 **1. A policy requiring every image to be signed.**
+
+> If the registry is private, add `spec.credentials.providers` to this policy. Without it the
+> controller reads the registry anonymously and takes a 401, which is an *evaluation error*
+> rather than a failed verification — under `failurePolicy: Ignore` the policy is then skipped
+> and the pod is admitted for a reason that has nothing to do with this bug. A public registry
+> avoids the question entirely.
 
 ```yaml
 apiVersion: policies.kyverno.io/v1
@@ -127,9 +146,10 @@ EOF
 Under `validationActions: [Audit]` the same thing shows up as a single `skip` row for the pod
 naming the exception — `unsigned:1.0` produces no result at all.
 
-### The CEL half, if you want a one-step version
+### The CEL half, which reproduces in one step
 
-Referencing `exceptions` in an ivpol fails at policy-creation time:
+Referencing `exceptions` in an `ImageValidatingPolicy` fails at policy-creation time, before
+any pod is involved:
 
 ```
 spec.validations[0].expression: Invalid value:
@@ -137,16 +157,19 @@ spec.validations[0].expression: Invalid value:
   ERROR: <input>:1:31: undeclared reference to 'exceptions' (in container '')
 ```
 
-The identical expression on a `ValidatingPolicy` compiles.
+Seven spellings were tried — `i in exceptions.allowedImages`, `i.image in …`, `i.reference in
+…`, `i.name in …`, `i.identifier in …`, and a bare `size(exceptions.allowedImages) >= 0`. All
+fail on `exceptions`. (Two of them also report `type 'string' does not support field
+selection`, which incidentally confirms `images.containers` is a list of plain strings.)
 
 ## Expected behaviour
 
 Either would resolve this; the first is the feature, the second is the safety net.
 
 1. **Register `exceptions` in the `ImageValidatingPolicy` CEL environment**, so
-   `exceptions.allowedImages` works as it does in `ValidatingPolicy`. `images.containers` is
-   already a list of plain image-reference strings, so `i in exceptions.allowedImages` needs no
-   new type work.
+   `exceptions.allowedImages` is usable as it is in `ValidatingPolicy`. `images.containers` is
+   already a list of plain image-reference strings, so `i in exceptions.allowedImages` should
+   need no new type work.
 
 2. **Until then, reject the combination rather than ignoring it.** A `PolicyException` carrying
    `spec.images` or `spec.allowedValues` whose `policyRefs` name an `ImageValidatingPolicy`
