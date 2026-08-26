@@ -163,7 +163,7 @@ phase switch being a re-render and being a re-render plus a manual cleanup nobod
 ### 3.3 The upstream issue — it is already written
 
 The brief asks for a GitHub issue about ivpol `PolicyException` skipping whole resources.
-`project_metadata/history/poc/kyverno-issue-draft.md` is a finished 361-line draft: title, labels,
+`project_metadata/kyverno-ivpol-policyexception-issue-concise.md` is the finished issue: title, labels,
 version table, two reproductions (the CEL compile error and the `spec.images`-is-inert behaviour),
 an expected-behaviour section with two options, a 25-row index of every related upstream
 issue/KDP, and a triage paragraph. It cites the exact gap — `KDP#70` (ivpol design) never mentions
@@ -824,7 +824,7 @@ warnings), `kyverno_render.py --check` clean on both the pinned and `_preview-1.
 | 3 | **Renamed and rescoped.** `soe-notary-signed-simple` → `require-org-signed-images`; the `mode` machinery deleted and replaced with `admission.phase` (1 \| 2, per cluster, refused on 1.18 for phase 2); `policy-exception/` → `container_exemptions/`, moved rather than re-rendered; `OWNED_FILES` is now the union across both phases. |
 | 3.6 | **Comment diet**, with a budget test. `20-polex.yaml` went from 61 comment lines to 20 — and the header is now emitted once per file rather than once per exemption, so it no longer grows with the exemption count. |
 | 3.7 | **Background scan on**, with the reports-controller IRSA prerequisite in the rendered header. |
-| 4a | **Upstream issue written**: [`kyverno-issue.md`](kyverno-issue.md), ~180 lines, one runnable two-image reproduction, three links. The 361-line draft stays in `history/` as notes. |
+| 4a | **Upstream issue written, reproduced and reduced to one file**: [`kyverno-ivpol-policyexception-issue-concise.md`](kyverno-ivpol-policyexception-issue-concise.md). Run end to end on EKS v1.36 / Kyverno v1.19.0: both images denied on their own, the exempted image admitted, the unrelated image still denied on its own, and the two-container pod **created** — the central claim is measured, not inferred. It carries a `ValidatingPolicy` control showing the same exception shape denying the same mixed pod, which is what makes the ivpol behaviour a bug rather than a design choice. The earlier long draft and the 361-line `history/` notes were deleted; this file is the only version. |
 | 4c | **`.kyverno/poc/` archived** to `history/kyverno-poc-suite/`; F1–F5 lifted into `unikube/README.md` as "What Kyverno does and does not do on these versions". |
 | 7 | **Docs reworked**: ADR-0004 added (superseding ADR-0002, which is kept in full); the F1 error corrected in ADR-0003 **and** in `trust/README.md`, which was rewritten rather than swept. |
 

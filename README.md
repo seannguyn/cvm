@@ -382,7 +382,7 @@ ADR-0002's rationales 1 and 2 are **not refuted by this decision** and are the h
   list and the scanner's ignore list, or a CVE accepted in one and not the other.
 - Kyverno's `PolicyException` remains resource-scoped for `ImageValidatingPolicy` long enough
   that phase 2's residual hole matters. Filed upstream; see
-  [`project_metadata/kyverno-issue.md`](project_metadata/kyverno-issue.md).
+  [`project_metadata/kyverno-ivpol-policyexception-issue-concise.md`](project_metadata/kyverno-ivpol-policyexception-issue-concise.md).
 - A Kyverno outage blocks deployments fleet-wide (i.e. `failurePolicy` was set to `Fail`
   somewhere, or the webhook's latency became load-bearing).
 

@@ -1943,7 +1943,7 @@ source env.sh && bash probe-cel.sh 2>&1 | tee probe-cel.txt
 | `exceptions.allowedImages` in an ivpol | **unavailable** — `undeclared reference to 'exceptions'` |
 
 The last one is why the exemption list is rendered into the policy rather than read from
-`PolicyException.spec.images`, and it is the subject of `poc/kyverno-issue-draft.md`.
+`PolicyException.spec.images`, and it is the subject of `project_metadata/kyverno-ivpol-policyexception-issue-concise.md`.
 
 ### 11.5 Fixtures: a second self-built registry
 
