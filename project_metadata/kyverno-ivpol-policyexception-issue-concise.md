@@ -2,7 +2,9 @@
 
 ## Versions
 
-| | |
+Please disregard the out-of-date and incorrect version filled in as part of this Bug template. The below is correct technology and version
+
+| Technology | Version |
 |---|---|
 | Kubernetes | v1.36 (EKS) |
 | Kyverno | v1.19.0 |
@@ -21,19 +23,21 @@ This differs from `ValidatingPolicy`, where the same `spec.images` values are ex
 | unrelated image in the same Pod | still evaluated | not evaluated |
 | mixed Pod | **DENY** | **ADMIT** |
 
-## Reproduction
+## Reproduction Summary
 
-One `ImageValidatingPolicy` requires every image to be signed by a self-signed CA. Neither test image is signed by it, so both are denied on their own. A `PolicyException` naming only `pause:3.9` is then added.
+One `ImageValidatingPolicy` requires every image to be signed by a generated self-signed CA. Neither test image is signed by it, so both are **denied** on their own. A `PolicyException` naming only `pause:3.9` is then added.
 
-| Pod | Exception | Expected | Actual |
-|---|---|---|---|
-| `pause:3.9` | none | Deny | Deny |
-| `busybox:1.29-4` | none | Deny | Deny |
-| `pause:3.9` | `pause:3.9` | Admit | Admit |
-| `busybox:1.29-4` | `pause:3.9` | Deny | Deny |
-| `pause:3.9` + `busybox:1.29-4` | `pause:3.9` | Deny | **Admit** |
+| Pod | Exception | Expected | Actual | Comment |
+|---|---|---|---|---|
+| `pause:3.9` | none | **❌ Deny** | **❌ Deny** | - |
+| `busybox:1.29-4` | none | **❌ Deny** | **❌ Deny** | - |
+| `pause:3.9` | `pause:3.9` | **✅ Admit** | **✅ Admit** | - |
+| `busybox:1.29-4` | none | **❌ Deny** | **❌ Deny** | - |
+| `pause:3.9` + `busybox:1.29-4` | only `pause:3.9` | **❌ Deny** | **✅ Admit** | **BUG:** `busybox:1.29-4` is unsigned, is NOT excepted, and is denied on its own — yet it is admitted alongside the excepted image. |
 
-The last row is the bug: `busybox:1.29-4` is unsigned, is named by nothing, and is denied on its own — yet it is admitted alongside the exempted image.
+## Step-by-Step Reproduction
+
+### Enable policy exceptions
 
 Policy exceptions must be enabled and the namespace declared:
 
