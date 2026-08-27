@@ -139,7 +139,7 @@ Model is unchanged from what's rendered today. The work:
 | `# Mode: simple` line in every generated header | `# Phase: 1` — the header must still say which shape produced the file, because phase 1 and phase 2 emit files with overlapping names and different security properties |
 | `render_simple_policy()` (`render_exception()` already has the neutral name) | `render_signature_policy()` |
 | `cluster_dir` → `<env>/<cluster>/policy-exception/` | `<env>/<cluster>/container_exemptions/` |
-| `--1.19` flag | **kept**, per the brief |
+| `--1.19` flag | kept during the pivot per the brief, **removed afterwards**: it was a second name for `--kyverno-version 1.19`, so the two could contradict each other and needed a precedence rule. One spelling, no rule. |
 
 Every docstring and header note in `kyverno_render.py` that says "simple mode", "advanced mode",
 "the candidate models", or points at `poc/kyverno_render_advanced.py` is now a pointer into
@@ -827,6 +827,14 @@ warnings), `kyverno_render.py --check` clean on both the pinned and `_preview-1.
 | 4a | **Upstream issue written, reproduced and reduced to one file**: [`kyverno-ivpol-policyexception-issue-concise.md`](kyverno-ivpol-policyexception-issue-concise.md). Run end to end on EKS v1.36 / Kyverno v1.19.0: both images denied on their own, the exempted image admitted, the unrelated image still denied on its own, and the two-container pod **created** — the central claim is measured, not inferred. It carries a `ValidatingPolicy` control showing the same exception shape denying the same mixed pod, which is what makes the ivpol behaviour a bug rather than a design choice. The earlier long draft and the 361-line `history/` notes were deleted; this file is the only version. |
 | 4c | **`.kyverno/poc/` archived** to `history/kyverno-poc-suite/`; F1–F5 lifted into `unikube/README.md` as "What Kyverno does and does not do on these versions". |
 | 7 | **Docs reworked**: ADR-0004 added (superseding ADR-0002, which is kept in full); the F1 error corrected in ADR-0003 **and** in `trust/README.md`, which was rewritten rather than swept. |
+
+### Three changes made after the pivot landed
+
+| | |
+|---|---|
+| **Preview refresh is opt-in** | `_preview-<version>/` trees were refreshed on every render and gated by every `--check`. That fixed staleness and introduced a worse habit: a one-cluster render rewrote a whole fleet's preview tree, so a PR diff contained directories nobody had touched, and an unrelated `--check` failed on a tree the caller never mentioned. Now `--refresh-previews` does both, and an ordinary render names the trees it left alone. |
+| **`cmdb-app-service-id` moved onto the exemption** | It was one fleet-wide value from `$CMDB_APP_SERVICE_ID` stamped on every object, which recorded who ran the renderer rather than who owns the exemption — not the same question once two teams have entries in one file. It is now a required field on each exemption entry, rendered as the label on that entry's PolicyException only. The flag and the environment variable are gone. Policies carry no owner label: they are platform-owned and shared by every team on the cluster. `--summary` gained an exceptions-by-owner breakdown. |
+| **`--1.19` removed** | See the rename table above. |
 
 ### Two things that changed while building
 

@@ -166,7 +166,7 @@ The tenant is the smallest unit a version can be rolled to.
 
 **6. Move a cluster to Kyverno 1.19.** Set `admission.kyverno.version: "1.19"` in that cluster's
 file, re-render, commit. One directory changes. `_preview-1.19/` already shows what the whole
-fleet would look like.
+fleet would look like — refresh it with `kyverno_render.py --refresh-previews`.
 
 **7. Rotate the signing leaf (routine, ~365 days).** Re-issue from the same CA, update the CI
 secrets. **No terraform, no manifests, no PR** — `trust/ca.crt` is unchanged. Because signatures
